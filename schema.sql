@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS request_mail (
+CREATE TABLE IF NOT EXISTS ae_llm_agent_mail (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     uidl VARCHAR(255) NOT NULL,
     message_id VARCHAR(1000) NULL,
@@ -29,9 +29,9 @@ CREATE TABLE IF NOT EXISTS request_mail (
     sent_at DATETIME NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uq_request_mail_uidl (uidl),
-    INDEX idx_request_mail_status (status),
-    INDEX idx_request_mail_send_status (send_status),
-    INDEX idx_request_mail_subject_hash (subject_hash),
-    INDEX idx_request_mail_duplicate_of (duplicate_of)
+    UNIQUE KEY uq_ae_llm_agent_mail_uidl (uidl),
+    INDEX idx_ae_llm_agent_mail_status (status),
+    INDEX idx_ae_llm_agent_mail_send_status (send_status),
+    INDEX idx_ae_llm_agent_mail_subject_hash (subject_hash),
+    INDEX idx_ae_llm_agent_mail_duplicate_of (duplicate_of)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
