@@ -25,7 +25,7 @@ def test_main_skips_when_pipeline_lock_is_not_acquired():
 
 
 def test_main_migrates_and_ensures_schema_under_lock():
-    call_order: list[str] = []
+    call_order = []
 
     with (
         patch.object(run.settings, "validate"),
@@ -38,7 +38,8 @@ def test_main_migrates_and_ensures_schema_under_lock():
         patch.object(
             run.db,
             "ensure_schema",
-            side_effect=lambda settings: call_order.append("schema"),
+            side_effect=lambda settings: call_order.append("schema")
+            or {"backfilled_api_routes": 0},
         ),
         patch.object(run, "_run_once", side_effect=lambda: call_order.append("run")),
     ):
@@ -47,44 +48,45 @@ def test_main_migrates_and_ensures_schema_under_lock():
     assert call_order == ["migrate", "schema", "run"]
 
 
-def test_run_once_recovers_before_processing_retry_rows():
-    call_order: list[str] = []
+def test_run_once_order():
+    call_order = []
 
     with (
         patch.object(
             run.db,
             "recover_incomplete_requests",
             side_effect=lambda settings: call_order.append("recover")
-            or {"received": 1, "processing": 1, "ignored": 0},
+            or {"processing": 1},
         ),
         patch.object(
             run,
-            "retry_failed_analysis",
-            side_effect=lambda limit: call_order.append("retry") or (0, True),
+            "collect_legacy_pop3_mail",
+            side_effect=lambda: call_order.append("legacy_collect") or 0,
         ),
-        patch.object(run, "process_pending_send"),
         patch.object(
             run,
-            "collect_and_process_new_mail",
-            side_effect=lambda limit: call_order.append("collect") or 0,
+            "process_api_queue",
+            side_effect=lambda limit: call_order.append("api_queue") or (0, True),
+        ),
+        patch.object(
+            run,
+            "process_pending_send",
+            side_effect=lambda: call_order.append("send"),
         ),
     ):
         run._run_once()
 
-    assert call_order == ["recover", "retry", "collect"]
+    assert call_order == ["recover", "legacy_collect", "api_queue", "send"]
 
 
-def test_failed_retry_stops_before_new_mail_collection():
+def test_analyze_row_skips_non_claimable_row():
+    row = {"id": 10, "route_type": "FILE_ARCHIVE", "status": "ROUTED"}
+
     with (
-        patch.object(
-            run.db,
-            "recover_incomplete_requests",
-            return_value={"received": 0, "processing": 1, "ignored": 0},
-        ),
-        patch.object(run, "retry_failed_analysis", return_value=(0, False)),
-        patch.object(run, "process_pending_send"),
-        patch.object(run, "collect_and_process_new_mail") as collect,
+        patch.object(run.db, "claim_api_request", return_value=False),
+        patch.object(run, "analyze_request") as analyze,
     ):
-        run._run_once()
+        result = run._analyze_row(row)
 
-    collect.assert_not_called()
+    assert result is True
+    analyze.assert_not_called()
