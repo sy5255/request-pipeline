@@ -40,6 +40,7 @@ def _profile(instruction_template: str | None):
         "request_template_json": {
             "request_id": "{{request_id}}",
             "request_title": "{{request_title}}",
+            "instruction_prompt": "{{instruction_prompt}}",
             "mail_body": "{{mail_body}}",
         },
         "response_config_json": {
@@ -75,7 +76,7 @@ def test_non_403_is_not_classified_as_gateway_block():
     assert not _is_gateway_block(response)
 
 
-def test_instruction_template_is_attached_to_request_title():
+def test_instruction_and_request_title_are_sent_separately():
     response = _response(
         200,
         '{"status":"COMPLETED","answer_text":"ok","search_results":[],"trace":{}}',
@@ -100,14 +101,15 @@ def test_instruction_template_is_attached_to_request_title():
         )
 
     payload = request.call_args.kwargs["json"]
-    assert payload["request_title"].startswith(
+    assert payload["request_title"] == "ABC Lot Contact 불량"
+    assert payload["instruction_prompt"].startswith(
         "아래 텍스트는 새로 들어온 불량분석 의뢰제목이야."
     )
-    assert payload["request_title"].endswith("ABC Lot Contact 불량")
+    assert payload["instruction_prompt"].endswith("ABC Lot Contact 불량")
     assert payload["mail_body"] == "메일 본문"
 
 
-def test_profile_without_instruction_keeps_original_request_title():
+def test_profile_without_instruction_sends_empty_instruction():
     response = _response(
         200,
         '{"status":"COMPLETED","answer_text":"ok","search_results":[],"trace":{}}',
@@ -126,3 +128,4 @@ def test_profile_without_instruction_keeps_original_request_title():
 
     payload = request.call_args.kwargs["json"]
     assert payload["request_title"] == "원본 제목"
+    assert payload["instruction_prompt"] == ""
