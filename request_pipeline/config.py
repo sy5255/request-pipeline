@@ -18,6 +18,8 @@ class Settings:
     mysql_user: str = os.getenv("MYSQL_USER", "ifa_user")
     mysql_password: str = os.getenv("MYSQL_PASSWORD", "")
 
+    # 중앙 ingest_pop3 collector 도입 후 request-pipeline은 기본적으로 DB queue만 처리합니다.
+    pop3_collection_enabled: bool = _bool("POP3_COLLECTION_ENABLED", False)
     pop3_host: str = os.getenv("POP3_HOST", "")
     pop3_port: int = int(os.getenv("POP3_PORT", "995"))
     pop3_user: str = os.getenv("POP3_USER", "")
@@ -25,6 +27,7 @@ class Settings:
     pop3_use_ssl: bool = _bool("POP3_USE_SSL", True)
     pop3_timeout_seconds: int = int(os.getenv("POP3_TIMEOUT_SECONDS", "30"))
 
+    # 레거시 POP3 수집 모드를 잠시 사용할 때만 쓰는 단일 API 대상 접두어입니다.
     target_subject_prefix: str = os.getenv(
         "TARGET_SUBJECT_PREFIX",
         "[분석 대기] [Defect 형태/성분 분석의뢰]",
@@ -32,14 +35,10 @@ class Settings:
     duplicate_window_hours: int = int(os.getenv("DUPLICATE_WINDOW_HOURS", "72"))
     max_retry_count: int = int(os.getenv("MAX_RETRY_COUNT", "3"))
 
-    # RETRY와 신규 메일을 합쳐 한 번의 실행에서 호출할 최대 분석 건수입니다.
     max_analysis_per_run: int = int(os.getenv("MAX_ANALYSIS_PER_RUN", "3"))
     analysis_interval_seconds: float = float(os.getenv("ANALYSIS_INTERVAL_SECONDS", "3"))
-
-    # 비정상 종료로 남은 PROCESSING 요청을 다음 실행에서 복구하기 위한 기준입니다.
     stale_processing_minutes: int = int(os.getenv("STALE_PROCESSING_MINUTES", "15"))
 
-    # 여러 스케줄러가 동시에 실행되어 같은 메일을 처리하는 것을 방지합니다.
     pipeline_lock_name: str = os.getenv(
         "PIPELINE_LOCK_NAME", "request_pipeline_scheduler"
     ).strip()
@@ -74,10 +73,16 @@ class Settings:
     def validate(self) -> None:
         required = {
             "MYSQL_PASSWORD": self.mysql_password,
-            "POP3_HOST": self.pop3_host,
-            "POP3_USER": self.pop3_user,
-            "POP3_PASSWORD": self.pop3_password,
         }
+        if self.pop3_collection_enabled:
+            required.update(
+                {
+                    "POP3_HOST": self.pop3_host,
+                    "POP3_USER": self.pop3_user,
+                    "POP3_PASSWORD": self.pop3_password,
+                }
+            )
+
         missing = [name for name, value in required.items() if not value]
         if missing:
             raise RuntimeError(f"Missing required settings: {', '.join(missing)}")
