@@ -1,7 +1,8 @@
 import json
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import mysql.connector
 
@@ -18,6 +19,32 @@ def connect(settings: Settings):
         password=settings.mysql_password,
         autocommit=False,
     )
+
+
+@contextmanager
+def pipeline_lock(settings: Settings) -> Iterator[bool]:
+    """MySQL advisory lock으로 스케줄러 중복 실행을 방지합니다."""
+    conn = connect(settings)
+    cur = conn.cursor()
+    acquired = False
+
+    try:
+        cur.execute(
+            "SELECT GET_LOCK(%s, %s)",
+            (settings.pipeline_lock_name, settings.pipeline_lock_wait_seconds),
+        )
+        row = cur.fetchone()
+        acquired = bool(row and row[0] == 1)
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                cur.execute("SELECT RELEASE_LOCK(%s)", (settings.pipeline_lock_name,))
+                cur.fetchone()
+            except Exception:
+                pass
+        cur.close()
+        conn.close()
 
 
 def ensure_schema(settings: Settings) -> None:
@@ -57,10 +84,18 @@ def insert_received(settings: Settings, uidl: str, mail: ParsedMail) -> int:
             ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'RECEIVED','NOT_READY')
             """,
             (
-                uidl, mail.message_id, mail.original_subject, mail.request_title,
-                mail.normalized_subject, mail.subject_hash, mail.mail_body,
-                mail.sender_email, mail.requester_user_id, mail.reply_to_email,
-                mail.reply_to_email or mail.sender_email, mail.mail_sent_at,
+                uidl,
+                mail.message_id,
+                mail.original_subject,
+                mail.request_title,
+                mail.normalized_subject,
+                mail.subject_hash,
+                mail.mail_body,
+                mail.sender_email,
+                mail.requester_user_id,
+                mail.reply_to_email,
+                mail.reply_to_email or mail.sender_email,
+                mail.mail_sent_at,
             ),
         )
         request_id = int(cur.lastrowid)
@@ -71,7 +106,12 @@ def insert_received(settings: Settings, uidl: str, mail: ParsedMail) -> int:
         conn.close()
 
 
-def find_duplicate(settings: Settings, request_id: int, subject_hash: str, sent_at: datetime | None) -> int | None:
+def find_duplicate(
+    settings: Settings,
+    request_id: int,
+    subject_hash: str,
+    sent_at: datetime | None,
+) -> int | None:
     reference_time = sent_at or datetime.now()
     lower_bound = reference_time - timedelta(hours=settings.duplicate_window_hours)
     conn = connect(settings)
@@ -94,8 +134,24 @@ def find_duplicate(settings: Settings, request_id: int, subject_hash: str, sent_
         conn.close()
 
 
+def mark_ignored(settings: Settings, request_id: int) -> None:
+    _update(
+        settings,
+        request_id,
+        status="IGNORED",
+        send_status="NOT_READY",
+        last_error=None,
+    )
+
+
 def mark_duplicate(settings: Settings, request_id: int, duplicate_of: int) -> None:
-    _update(settings, request_id, status="DUPLICATE", duplicate_of=duplicate_of, send_status="NOT_READY")
+    _update(
+        settings,
+        request_id,
+        status="DUPLICATE",
+        duplicate_of=duplicate_of,
+        send_status="NOT_READY",
+    )
 
 
 def mark_processing(settings: Settings, request_id: int) -> None:
@@ -124,8 +180,11 @@ def mark_retry(settings: Settings, request_id: int, error: str) -> None:
     try:
         cur.execute(
             """
-            UPDATE request_mail SET status=IF(retry_count+1 >= %s,'FAILED','RETRY'),
-                retry_count=retry_count+1, last_error=%s WHERE id=%s
+            UPDATE request_mail
+            SET status=IF(retry_count+1 >= %s,'FAILED','RETRY'),
+                retry_count=retry_count+1,
+                last_error=%s
+            WHERE id=%s
             """,
             (settings.max_retry_count, error[:4000], request_id),
         )
@@ -135,11 +194,83 @@ def mark_retry(settings: Settings, request_id: int, error: str) -> None:
         conn.close()
 
 
+def recover_incomplete_requests(settings: Settings) -> dict[str, int]:
+    """
+    비정상 종료로 남은 대상 RECEIVED와 오래된 PROCESSING 요청을 RETRY로 복구합니다.
+
+    복구 자체는 실패 횟수로 계산하지 않습니다. 실제 API 재호출이 실패했을 때만
+    mark_retry()가 retry_count를 증가시킵니다.
+    """
+    conn = connect(settings)
+    cur = conn.cursor()
+
+    try:
+        cur.execute(
+            """
+            UPDATE request_mail
+            SET status='RETRY',
+                last_error='Recovered target request left in RECEIVED state'
+            WHERE status='RECEIVED'
+              AND request_title IS NOT NULL
+              AND retry_count < %s
+            """,
+            (settings.max_retry_count,),
+        )
+        received_count = cur.rowcount
+
+        cur.execute(
+            """
+            UPDATE request_mail
+            SET status='RETRY',
+                last_error='Recovered stale PROCESSING request after scheduler interruption'
+            WHERE status='PROCESSING'
+              AND request_title IS NOT NULL
+              AND updated_at < DATE_SUB(NOW(), INTERVAL %s MINUTE)
+              AND retry_count < %s
+            """,
+            (settings.stale_processing_minutes, settings.max_retry_count),
+        )
+        processing_count = cur.rowcount
+
+        # 과거 버전에서 비대상 메일이 RECEIVED로 남았던 데이터도 정리합니다.
+        cur.execute(
+            """
+            UPDATE request_mail
+            SET status='IGNORED',
+                send_status='NOT_READY',
+                last_error=NULL
+            WHERE status='RECEIVED'
+              AND request_title IS NULL
+            """
+        )
+        ignored_count = cur.rowcount
+
+        conn.commit()
+        return {
+            "received": received_count,
+            "processing": processing_count,
+            "ignored": ignored_count,
+        }
+    finally:
+        cur.close()
+        conn.close()
+
+
 def list_retry(settings: Settings) -> list[dict[str, Any]]:
     conn = connect(settings)
     cur = conn.cursor(dictionary=True)
     try:
-        cur.execute("SELECT * FROM request_mail WHERE status='RETRY' AND retry_count < %s ORDER BY id", (settings.max_retry_count,))
+        cur.execute(
+            """
+            SELECT *
+            FROM request_mail
+            WHERE status='RETRY'
+              AND request_title IS NOT NULL
+              AND retry_count < %s
+            ORDER BY id
+            """,
+            (settings.max_retry_count,),
+        )
         return cur.fetchall()
     finally:
         cur.close()
@@ -152,8 +283,8 @@ def _update(settings: Settings, request_id: int, **fields: Any) -> None:
     cur = conn.cursor()
     try:
         cur.execute(
-            f"UPDATE request_mail SET {', '.join(f'{k}=%s' for k in keys)} WHERE id=%s",
-            tuple(fields[k] for k in keys) + (request_id,),
+            f"UPDATE request_mail SET {', '.join(f'{key}=%s' for key in keys)} WHERE id=%s",
+            tuple(fields[key] for key in keys) + (request_id,),
         )
         conn.commit()
     finally:
