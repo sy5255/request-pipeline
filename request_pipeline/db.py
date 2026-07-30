@@ -9,6 +9,9 @@ import mysql.connector
 from request_pipeline.config import Settings
 from request_pipeline.mail_parser import ParsedMail
 
+MAIL_TABLE = "ae_llm_agent_mail"
+LEGACY_MAIL_TABLE = "request_mail"
+
 
 def connect(settings: Settings):
     return mysql.connector.connect(
@@ -47,12 +50,62 @@ def pipeline_lock(settings: Settings) -> Iterator[bool]:
         conn.close()
 
 
-def ensure_schema(settings: Settings) -> None:
-    sql = Path(__file__).resolve().parent.parent.joinpath("schema.sql").read_text(encoding="utf-8")
+def _existing_mail_tables(settings: Settings) -> set[str]:
     conn = connect(settings)
     cur = conn.cursor()
     try:
-        for statement in [s.strip() for s in sql.split(";") if s.strip()]:
+        cur.execute(
+            """
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema=%s
+              AND table_name IN (%s, %s)
+            """,
+            (settings.mysql_database, MAIL_TABLE, LEGACY_MAIL_TABLE),
+        )
+        return {str(row[0]) for row in cur.fetchall()}
+    finally:
+        cur.close()
+        conn.close()
+
+
+def migrate_legacy_table(settings: Settings) -> bool:
+    """
+    기존 request_mail 테이블만 존재하면 ae_llm_agent_mail로 이름을 변경합니다.
+
+    두 테이블이 동시에 존재하면 어떤 테이블이 기준인지 자동 판단하지 않고 중단하여
+    데이터 유실 또는 처리 이력 분리를 방지합니다.
+    """
+    existing = _existing_mail_tables(settings)
+
+    if MAIL_TABLE in existing and LEGACY_MAIL_TABLE in existing:
+        raise RuntimeError(
+            f"Both {LEGACY_MAIL_TABLE} and {MAIL_TABLE} exist. "
+            "Reconcile the tables manually before running the pipeline."
+        )
+
+    if LEGACY_MAIL_TABLE not in existing:
+        return False
+
+    conn = connect(settings)
+    cur = conn.cursor()
+    try:
+        cur.execute(f"RENAME TABLE `{LEGACY_MAIL_TABLE}` TO `{MAIL_TABLE}`")
+        conn.commit()
+        return True
+    finally:
+        cur.close()
+        conn.close()
+
+
+def ensure_schema(settings: Settings) -> None:
+    sql = Path(__file__).resolve().parent.parent.joinpath("schema.sql").read_text(
+        encoding="utf-8"
+    )
+    conn = connect(settings)
+    cur = conn.cursor()
+    try:
+        for statement in [item.strip() for item in sql.split(";") if item.strip()]:
             cur.execute(statement)
         conn.commit()
     finally:
@@ -64,7 +117,10 @@ def uidl_exists(settings: Settings, uidl: str) -> bool:
     conn = connect(settings)
     cur = conn.cursor()
     try:
-        cur.execute("SELECT 1 FROM request_mail WHERE uidl=%s LIMIT 1", (uidl,))
+        cur.execute(
+            f"SELECT 1 FROM `{MAIL_TABLE}` WHERE uidl=%s LIMIT 1",
+            (uidl,),
+        )
         return cur.fetchone() is not None
     finally:
         cur.close()
@@ -76,8 +132,8 @@ def insert_received(settings: Settings, uidl: str, mail: ParsedMail) -> int:
     cur = conn.cursor()
     try:
         cur.execute(
-            """
-            INSERT INTO request_mail(
+            f"""
+            INSERT INTO `{MAIL_TABLE}`(
                 uidl, message_id, original_subject, request_title, normalized_subject,
                 subject_hash, mail_body, sender_email, requester_user_id, reply_to_email,
                 original_recipient_email, mail_sent_at, status, send_status
@@ -118,8 +174,8 @@ def find_duplicate(
     cur = conn.cursor()
     try:
         cur.execute(
-            """
-            SELECT id FROM request_mail
+            f"""
+            SELECT id FROM `{MAIL_TABLE}`
             WHERE id<>%s AND subject_hash=%s
               AND status IN ('PROCESSING','COMPLETED')
               AND COALESCE(mail_sent_at, received_at) BETWEEN %s AND %s
@@ -165,7 +221,9 @@ def mark_completed(settings: Settings, request_id: int, result: dict[str, Any]) 
         request_id,
         status="COMPLETED",
         answer_text=result.get("answer_text"),
-        search_results_json=json.dumps(result.get("search_results") or [], ensure_ascii=False),
+        search_results_json=json.dumps(
+            result.get("search_results") or [], ensure_ascii=False
+        ),
         chat_session_id=trace.get("session_id"),
         chat_turn_artifact_id=trace.get("turn_artifact_id"),
         chat_search_log_id=trace.get("search_log_id"),
@@ -179,8 +237,8 @@ def mark_retry(settings: Settings, request_id: int, error: str) -> None:
     cur = conn.cursor()
     try:
         cur.execute(
-            """
-            UPDATE request_mail
+            f"""
+            UPDATE `{MAIL_TABLE}`
             SET status=IF(retry_count+1 >= %s,'FAILED','RETRY'),
                 retry_count=retry_count+1,
                 last_error=%s
@@ -195,19 +253,14 @@ def mark_retry(settings: Settings, request_id: int, error: str) -> None:
 
 
 def recover_incomplete_requests(settings: Settings) -> dict[str, int]:
-    """
-    비정상 종료로 남은 대상 RECEIVED와 오래된 PROCESSING 요청을 RETRY로 복구합니다.
-
-    복구 자체는 실패 횟수로 계산하지 않습니다. 실제 API 재호출이 실패했을 때만
-    mark_retry()가 retry_count를 증가시킵니다.
-    """
+    """비정상 종료로 남은 대상 RECEIVED와 오래된 PROCESSING 요청을 복구합니다."""
     conn = connect(settings)
     cur = conn.cursor()
 
     try:
         cur.execute(
-            """
-            UPDATE request_mail
+            f"""
+            UPDATE `{MAIL_TABLE}`
             SET status='RETRY',
                 last_error='Recovered target request left in RECEIVED state'
             WHERE status='RECEIVED'
@@ -219,8 +272,8 @@ def recover_incomplete_requests(settings: Settings) -> dict[str, int]:
         received_count = cur.rowcount
 
         cur.execute(
-            """
-            UPDATE request_mail
+            f"""
+            UPDATE `{MAIL_TABLE}`
             SET status='RETRY',
                 last_error='Recovered stale PROCESSING request after scheduler interruption'
             WHERE status='PROCESSING'
@@ -232,10 +285,9 @@ def recover_incomplete_requests(settings: Settings) -> dict[str, int]:
         )
         processing_count = cur.rowcount
 
-        # 과거 버전에서 비대상 메일이 RECEIVED로 남았던 데이터도 정리합니다.
         cur.execute(
-            """
-            UPDATE request_mail
+            f"""
+            UPDATE `{MAIL_TABLE}`
             SET status='IGNORED',
                 send_status='NOT_READY',
                 last_error=NULL
@@ -261,9 +313,9 @@ def list_retry(settings: Settings) -> list[dict[str, Any]]:
     cur = conn.cursor(dictionary=True)
     try:
         cur.execute(
-            """
+            f"""
             SELECT *
-            FROM request_mail
+            FROM `{MAIL_TABLE}`
             WHERE status='RETRY'
               AND request_title IS NOT NULL
               AND retry_count < %s
@@ -282,8 +334,9 @@ def _update(settings: Settings, request_id: int, **fields: Any) -> None:
     conn = connect(settings)
     cur = conn.cursor()
     try:
+        assignments = ", ".join(f"`{key}`=%s" for key in keys)
         cur.execute(
-            f"UPDATE request_mail SET {', '.join(f'{key}=%s' for key in keys)} WHERE id=%s",
+            f"UPDATE `{MAIL_TABLE}` SET {assignments} WHERE id=%s",
             tuple(fields[key] for key in keys) + (request_id,),
         )
         conn.commit()
