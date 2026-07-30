@@ -1,3 +1,4 @@
+import json
 import logging
 import time
 
@@ -17,7 +18,6 @@ logger = logging.getLogger("request_pipeline")
 def _profile_key_from_row(row: dict) -> str:
     action = row.get("route_action_json") or {}
     if isinstance(action, str):
-        import json
         action = json.loads(action)
     profile_key = str(action.get("api_profile") or "").strip()
     if not profile_key:
@@ -26,6 +26,24 @@ def _profile_key_from_row(row: dict) -> str:
             f"rule={row.get('route_rule_key')}"
         )
     return profile_key
+
+
+def _legacy_pop3_collection_enabled() -> bool:
+    """
+    이전 config.py와 새 run.py가 일시적으로 섞여 배포되어도 DB queue 처리는 계속합니다.
+
+    새 설정 필드가 없으면 중앙 ingest_pop3 collector를 사용하는 것으로 간주하고
+    request-pipeline 내부 POP3 수집을 비활성화합니다.
+    """
+    if not hasattr(settings, "pop3_collection_enabled"):
+        logger.warning(
+            "settings.pop3_collection_enabled is missing; "
+            "legacy POP3 collection defaults to disabled. "
+            "Pull the latest request_pipeline/config.py to remove this warning."
+        )
+        return False
+
+    return bool(getattr(settings, "pop3_collection_enabled", False))
 
 
 def _analyze_row(row: dict) -> bool:
@@ -95,7 +113,7 @@ def process_api_queue(limit: int) -> tuple[int, bool]:
 
 
 def collect_legacy_pop3_mail() -> int:
-    if not settings.pop3_collection_enabled:
+    if not _legacy_pop3_collection_enabled():
         return 0
 
     collected = 0
