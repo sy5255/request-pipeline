@@ -43,12 +43,6 @@ def _sleep_between_requests() -> None:
 
 
 def retry_failed_analysis(limit: int) -> tuple[int, bool]:
-    """
-    RETRY 건을 제한된 수만 처리합니다.
-
-    반환값의 두 번째 값이 False이면 첫 실패가 발생한 것이므로
-    이번 실행에서는 신규 메일 분석도 진행하지 않습니다.
-    """
     rows = db.list_retry(settings)
     target_rows = rows[:limit]
 
@@ -141,8 +135,6 @@ def collect_and_process_new_mail(limit: int) -> int:
 
 
 def process_pending_send() -> None:
-    # 메일 발송 API는 아직 연결하지 않는다.
-    # MAIL_SEND_ENABLED=false 상태에서는 COMPLETED 건이 SEND_BLOCKED로 저장된다.
     if settings.mail_send_enabled:
         logger.warning("MAIL_SEND_ENABLED=true지만 발송 모듈은 아직 구현되지 않았습니다.")
 
@@ -166,7 +158,6 @@ def _run_once() -> None:
 
     remaining_limit = settings.max_analysis_per_run - retry_count
 
-    # RETRY 성공 직후 신규 API 호출이 이어질 때도 동일한 간격을 보장합니다.
     if retry_count > 0 and remaining_limit > 0:
         _sleep_between_requests()
 
@@ -182,9 +173,8 @@ def _run_once() -> None:
 
 def main() -> None:
     settings.validate()
-    db.ensure_schema(settings)
 
-    # MySQL advisory lock은 연결이 끊기면 자동 해제되므로 프로세스 강제 종료에도 안전합니다.
+    # 스키마 생성과 legacy 테이블 이름 변경도 동일한 advisory lock 안에서 수행합니다.
     with db.pipeline_lock(settings) as acquired:
         if not acquired:
             logger.warning(
@@ -194,6 +184,15 @@ def main() -> None:
             return
 
         logger.info("pipeline lock acquired lock=%s", settings.pipeline_lock_name)
+
+        if db.migrate_legacy_table(settings):
+            logger.warning(
+                "legacy table migrated old=%s new=%s",
+                db.LEGACY_MAIL_TABLE,
+                db.MAIL_TABLE,
+            )
+
+        db.ensure_schema(settings)
         _run_once()
 
 
