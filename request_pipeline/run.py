@@ -14,8 +14,21 @@ logging.basicConfig(
 logger = logging.getLogger("request_pipeline")
 
 
+def _profile_key_from_row(row: dict) -> str:
+    action = row.get("route_action_json") or {}
+    if isinstance(action, str):
+        import json
+        action = json.loads(action)
+    profile_key = str(action.get("api_profile") or "").strip()
+    if not profile_key:
+        raise RuntimeError(
+            f"API profile is missing for request_id={row.get('id')} "
+            f"rule={row.get('route_rule_key')}"
+        )
+    return profile_key
+
+
 def _analyze_row(row: dict) -> bool:
-    """API_ANALYSIS 경로 요청 한 건을 원자적으로 선점한 뒤 분석합니다."""
     request_id = int(row["id"])
 
     if not db.claim_api_request(settings, request_id):
@@ -28,20 +41,26 @@ def _analyze_row(row: dict) -> bool:
         return True
 
     try:
+        profile_key = _profile_key_from_row(row)
+        profile = db.get_api_profile(settings, profile_key)
         result = analyze_request(
             settings,
+            profile=profile,
             request_id=request_id,
-            requester_user_id=row["requester_user_id"],
-            requester_email=row["sender_email"],
-            request_title=row["request_title"],
+            requester_user_id=row.get("requester_user_id") or "",
+            requester_email=row.get("sender_email") or "",
+            request_title=row.get("request_title") or "",
             mail_body=row.get("mail_body") or "",
+            route_case=row.get("route_case"),
+            route_rule_key=row.get("route_rule_key"),
         )
         db.mark_completed(settings, request_id, result)
         logger.info(
-            "analysis completed request_id=%s route_case=%s rule=%s",
+            "analysis completed request_id=%s route_case=%s rule=%s profile=%s",
             request_id,
             row.get("route_case"),
             row.get("route_rule_key"),
+            profile_key,
         )
         return True
     except Exception as exc:
@@ -76,12 +95,6 @@ def process_api_queue(limit: int) -> tuple[int, bool]:
 
 
 def collect_legacy_pop3_mail() -> int:
-    """
-    중앙 ingest_pop3 collector 전환 전의 임시 호환 모드입니다.
-
-    POP3_COLLECTION_ENABLED=false가 기본이며, 활성화하더라도 API 대상 접두어만
-    API_ANALYSIS / ROUTED 상태로 등록합니다.
-    """
     if not settings.pop3_collection_enabled:
         return 0
 
