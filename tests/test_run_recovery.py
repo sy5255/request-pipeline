@@ -12,13 +12,39 @@ def _lock_result(acquired: bool):
 def test_main_skips_when_pipeline_lock_is_not_acquired():
     with (
         patch.object(run.settings, "validate"),
-        patch.object(run.db, "ensure_schema"),
         patch.object(run.db, "pipeline_lock", return_value=_lock_result(False)),
+        patch.object(run.db, "migrate_legacy_table") as migrate,
+        patch.object(run.db, "ensure_schema") as ensure_schema,
         patch.object(run, "_run_once") as run_once,
     ):
         run.main()
 
+    migrate.assert_not_called()
+    ensure_schema.assert_not_called()
     run_once.assert_not_called()
+
+
+def test_main_migrates_and_ensures_schema_under_lock():
+    call_order: list[str] = []
+
+    with (
+        patch.object(run.settings, "validate"),
+        patch.object(run.db, "pipeline_lock", return_value=_lock_result(True)),
+        patch.object(
+            run.db,
+            "migrate_legacy_table",
+            side_effect=lambda settings: call_order.append("migrate") or True,
+        ),
+        patch.object(
+            run.db,
+            "ensure_schema",
+            side_effect=lambda settings: call_order.append("schema"),
+        ),
+        patch.object(run, "_run_once", side_effect=lambda: call_order.append("run")),
+    ):
+        run.main()
+
+    assert call_order == ["migrate", "schema", "run"]
 
 
 def test_run_once_recovers_before_processing_retry_rows():
