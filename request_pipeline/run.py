@@ -92,22 +92,57 @@ def _sleep_between_requests() -> None:
         time.sleep(settings.analysis_interval_seconds)
 
 
-def process_api_queue(limit: int) -> tuple[int, bool]:
-    rows = db.list_api_ready(settings, limit)
-    logger.info("api queue ready=%s processing_limit=%s", len(rows), limit)
+def process_api_queue(batch_size: int) -> tuple[int, bool]:
+    """
+    API 대기 큐를 작은 배치로 조회하되, 한 번의 실행에서 큐가 빌 때까지 처리합니다.
+
+    기존 MAX_ANALYSIS_PER_RUN 설정값은 하위 호환을 위해 유지하지만 실제 의미는
+    DB에서 한 번에 가져오는 queue batch size입니다. API 호출은 병렬 실행하지 않고
+    한 건씩 순차 처리하며 요청 사이 간격도 그대로 적용합니다.
+    """
+    if batch_size < 1:
+        raise RuntimeError("API queue batch size must be at least 1")
 
     processed_count = 0
-    for index, row in enumerate(rows):
-        if not _analyze_row(row):
-            logger.warning(
-                "api queue processing stopped after failure request_id=%s",
-                row["id"],
-            )
-            return processed_count, False
+    batch_number = 0
 
-        processed_count += 1
-        if index < len(rows) - 1:
-            _sleep_between_requests()
+    while True:
+        rows = db.list_api_ready(settings, batch_size)
+        if not rows:
+            if batch_number == 0:
+                logger.info(
+                    "api queue ready=0 batch_size=%s processed_total=0",
+                    batch_size,
+                )
+            break
+
+        batch_number += 1
+        logger.info(
+            "api queue batch=%s ready=%s batch_size=%s processed_total=%s",
+            batch_number,
+            len(rows),
+            batch_size,
+            processed_count,
+        )
+
+        for row in rows:
+            if processed_count > 0:
+                _sleep_between_requests()
+
+            if not _analyze_row(row):
+                logger.warning(
+                    "api queue processing stopped after failure request_id=%s "
+                    "processed_total=%s",
+                    row["id"],
+                    processed_count,
+                )
+                return processed_count, False
+
+            processed_count += 1
+
+        # 조회 건수가 배치 크기보다 작으면 이번 배치가 마지막입니다.
+        if len(rows) < batch_size:
+            break
 
     return processed_count, True
 
@@ -155,7 +190,7 @@ def _run_once() -> None:
         return
 
     logger.info(
-        "pipeline finished legacy_collected=%s api_completed=%s max_per_run=%s",
+        "pipeline finished legacy_collected=%s api_completed=%s queue_batch_size=%s",
         legacy_collected,
         processed_count,
         settings.max_analysis_per_run,
