@@ -14,6 +14,14 @@ RULE_TABLE = "ae_llm_agent_mail_rule"
 API_PROFILE_TABLE = "ae_llm_agent_api_profile"
 LEGACY_MAIL_TABLE = "request_mail"
 
+DEFAULT_DEFECT_INSTRUCTION_TEMPLATE = (
+    "아래 텍스트는 새로 들어온 불량분석 의뢰제목이야. "
+    "이전에 이와 비슷한 분석 이력이 있는지 검색하고, "
+    "참고할만한 이전 분석 이력을 찾아줘. "
+    "참고할만한 이전 분석 레포트는 정확한 문서 이름을 함께 알려줘."
+    "\n\n불량분석 의뢰제목:\n{{raw_request_title}}"
+)
+
 
 def connect(settings: Settings):
     return mysql.connector.connect(
@@ -175,6 +183,46 @@ def _ensure_mail_route_columns(settings: Settings) -> None:
         conn.close()
 
 
+def _ensure_api_profile_columns(settings: Settings) -> None:
+    if _column_exists(settings, API_PROFILE_TABLE, "instruction_template"):
+        return
+    conn = connect(settings)
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"""
+            ALTER TABLE `{API_PROFILE_TABLE}`
+            ADD COLUMN `instruction_template` LONGTEXT NULL
+            AFTER `response_config_json`
+            """
+        )
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+
+
+def _seed_default_instruction_template(settings: Settings) -> int:
+    conn = connect(settings)
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"""
+            UPDATE `{API_PROFILE_TABLE}`
+            SET instruction_template=%s
+            WHERE profile_key='defect-analysis'
+              AND (instruction_template IS NULL OR TRIM(instruction_template)='')
+            """,
+            (DEFAULT_DEFECT_INSTRUCTION_TEMPLATE,),
+        )
+        count = cur.rowcount
+        conn.commit()
+        return count
+    finally:
+        cur.close()
+        conn.close()
+
+
 def _backfill_legacy_api_routes(settings: Settings) -> int:
     conn = connect(settings)
     cur = conn.cursor()
@@ -216,8 +264,13 @@ def ensure_schema(settings: Settings) -> dict[str, int]:
         conn.close()
 
     _ensure_mail_route_columns(settings)
+    _ensure_api_profile_columns(settings)
+    seeded_instruction_templates = _seed_default_instruction_template(settings)
     backfilled = _backfill_legacy_api_routes(settings)
-    return {"backfilled_api_routes": backfilled}
+    return {
+        "backfilled_api_routes": backfilled,
+        "seeded_instruction_templates": seeded_instruction_templates,
+    }
 
 
 def _decode_json_fields(row: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
