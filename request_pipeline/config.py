@@ -55,8 +55,9 @@ class Settings:
     web_api_connect_timeout: int = int(os.getenv("WEB_API_CONNECT_TIMEOUT", "10"))
     web_api_read_timeout: int = int(os.getenv("WEB_API_READ_TIMEOUT", "180"))
 
-    # 운영에서는 SSL 검증을 유지하고 사내 CA 인증서 파일을 지정하는 것을 권장합니다.
-    report_search_verify_ssl: bool = _bool("REPORT_SEARCH_VERIFY_SSL", True)
+    # 기존 개발 환경과의 호환성을 위해 미설정 시 SSL 검증을 비활성화합니다.
+    # 운영에서는 반드시 true 또는 사내 CA 번들 경로를 명시해야 합니다.
+    report_search_verify_ssl: bool = _bool("REPORT_SEARCH_VERIFY_SSL", False)
     report_search_ca_bundle: str = os.getenv("REPORT_SEARCH_CA_BUNDLE", "").strip()
 
     mail_send_enabled: bool = _bool("MAIL_SEND_ENABLED", False)
