@@ -121,6 +121,7 @@ INSERT IGNORE INTO ae_llm_agent_api_profile(
         'requester_user_id', '{{requester_user_id}}',
         'requester_email', '{{requester_email}}',
         'request_title', '{{request_title}}',
+        'instruction_prompt', '{{instruction_prompt}}',
         'mail_body', '{{mail_body}}'
     ),
     JSON_OBJECT(
@@ -141,6 +142,15 @@ INSERT IGNORE INTO ae_llm_agent_api_profile(
     'REPORT_SEARCH_CA_BUNDLE',
     '기존 report-search 내부 이메일 분석 API 프로필'
 );
+
+UPDATE ae_llm_agent_api_profile
+SET request_template_json = JSON_SET(
+    COALESCE(request_template_json, JSON_OBJECT()),
+    '$.request_title', '{{request_title}}',
+    '$.instruction_prompt', '{{instruction_prompt}}',
+    '$.mail_body', '{{mail_body}}'
+)
+WHERE profile_key = 'defect-analysis';
 
 INSERT IGNORE INTO ae_llm_agent_mail_rule(
     rule_key, rule_name, route_type, route_case, priority, enabled,
