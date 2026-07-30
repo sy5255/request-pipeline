@@ -74,12 +74,18 @@ class Settings:
         required = {
             "MYSQL_PASSWORD": self.mysql_password,
         }
-        if self.pop3_collection_enabled:
+
+        # 구버전 Settings 인스턴스와 새 validate()가 섞인 배포에서도
+        # AttributeError로 DB queue 전체가 중단되지 않도록 기본값을 False로 둡니다.
+        pop3_collection_enabled = bool(
+            getattr(self, "pop3_collection_enabled", False)
+        )
+        if pop3_collection_enabled:
             required.update(
                 {
-                    "POP3_HOST": self.pop3_host,
-                    "POP3_USER": self.pop3_user,
-                    "POP3_PASSWORD": self.pop3_password,
+                    "POP3_HOST": getattr(self, "pop3_host", ""),
+                    "POP3_USER": getattr(self, "pop3_user", ""),
+                    "POP3_PASSWORD": getattr(self, "pop3_password", ""),
                 }
             )
 
