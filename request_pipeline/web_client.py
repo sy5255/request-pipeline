@@ -158,7 +158,7 @@ def analyze_request(
     route_case: str | None = None,
     route_rule_key: str | None = None,
 ) -> dict[str, Any]:
-    # DB에 저장된 의뢰 제목은 변경하지 않고 API 호출 직전에만 프롬프트를 결합합니다.
+    # 검색에는 원본 의뢰 제목만 사용하고, 답변 지시문은 별도 필드로 전달합니다.
     base_context = {
         "request_id": request_id,
         "requester_user_id": requester_user_id,
@@ -169,13 +169,10 @@ def analyze_request(
         "route_rule_key": route_rule_key,
     }
     instruction_prompt = _build_instruction_prompt(profile, base_context)
-    api_request_title = instruction_prompt or request_title
 
     context = {
         **base_context,
-        # 기존 /internal/email-analysis 계약을 유지하면서 지시문을 제목 필드로 전달합니다.
-        "request_title": api_request_title,
-        # 새로운 API는 필요할 경우 아래 변수를 별도 payload 필드로 사용할 수 있습니다.
+        "request_title": request_title,
         "instruction_prompt": instruction_prompt,
     }
 
