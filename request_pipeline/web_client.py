@@ -1,5 +1,4 @@
 import copy
-import json
 import os
 from typing import Any
 from urllib.parse import urljoin
@@ -51,8 +50,28 @@ def _render_template(value: Any, context: dict[str, Any]) -> Any:
 
     rendered = value
     for key, item in context.items():
-        rendered = rendered.replace(f"{{{{{key}}}}}", "" if item is None else str(item))
+        rendered = rendered.replace(
+            f"{{{{{key}}}}}",
+            "" if item is None else str(item),
+        )
     return rendered
+
+
+def _build_instruction_prompt(
+    profile: dict[str, Any],
+    context: dict[str, Any],
+) -> str:
+    template = str(profile.get("instruction_template") or "").strip()
+    if not template:
+        return ""
+
+    rendered = _render_template(template, context)
+    if not isinstance(rendered, str):
+        raise RuntimeError(
+            "API profile instruction_template must render to text: "
+            f"{profile.get('profile_key')}"
+        )
+    return rendered.strip()
 
 
 def _resolve_verify(settings: Settings, profile: dict[str, Any]) -> bool | str:
@@ -139,14 +158,25 @@ def analyze_request(
     route_case: str | None = None,
     route_rule_key: str | None = None,
 ) -> dict[str, Any]:
-    context = {
+    # DB에 저장된 의뢰 제목은 변경하지 않고 API 호출 직전에만 프롬프트를 결합합니다.
+    base_context = {
         "request_id": request_id,
         "requester_user_id": requester_user_id,
         "requester_email": requester_email,
-        "request_title": request_title,
+        "raw_request_title": request_title,
         "mail_body": mail_body,
         "route_case": route_case,
         "route_rule_key": route_rule_key,
+    }
+    instruction_prompt = _build_instruction_prompt(profile, base_context)
+    api_request_title = instruction_prompt or request_title
+
+    context = {
+        **base_context,
+        # 기존 /internal/email-analysis 계약을 유지하면서 지시문을 제목 필드로 전달합니다.
+        "request_title": api_request_title,
+        # 새로운 API는 필요할 경우 아래 변수를 별도 payload 필드로 사용할 수 있습니다.
+        "instruction_prompt": instruction_prompt,
     }
 
     base_url = _resolve_base_url(settings, profile)
