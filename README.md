@@ -9,7 +9,8 @@ IFA Curator 요청 메일을 POP3로 수집하고 `report-search` 내부 분석 
 - 대상 제목 접두어 판별
 - Unicode NFKC 및 SHA-256 제목 정규화
 - 동일 제목 72시간 중복 판정
-- MySQL `request_mail` 저장
+- MySQL `ae_llm_agent_mail` 저장
+- 기존 `request_mail` 테이블 자동 이름 변경
 - `/internal/email-analysis` 호출
 - 실패 건 재시도
 - 실행당 분석 건수 제한 및 호출 간격 적용
@@ -30,6 +31,24 @@ python -m request_pipeline.run
 
 스케줄러에는 위 명령 하나만 등록합니다. 프로세스를 하루 종일 실행할 필요는 없으며, 주기 실행할 때 UIDL과 DB 상태를 기준으로 이전 처리 지점부터 이어서 처리합니다.
 
+## 테이블명과 기존 데이터 이전
+
+현재 메일 처리 이력 테이블은 다음 이름을 사용합니다.
+
+```text
+ae_llm_agent_mail
+```
+
+기존 환경에 `request_mail`만 존재하면 스케줄러 시작 시 advisory lock 안에서 다음 작업을 자동 수행합니다.
+
+```sql
+RENAME TABLE request_mail TO ae_llm_agent_mail;
+```
+
+따라서 기존 UIDL, 상태, 분석 결과 및 재시도 이력은 그대로 유지됩니다.
+
+두 테이블이 동시에 존재하면 어느 데이터를 기준으로 할지 자동 판단하지 않고 실행을 중단합니다. 이 경우 두 테이블의 데이터를 수동으로 확인하고 하나로 정리한 뒤 다시 실행해야 합니다.
+
 ## 무누락 처리 보장 방식
 
 이 프로젝트는 메일을 메모리 위치가 아니라 POP3 UIDL과 MySQL 상태로 추적합니다.
@@ -39,7 +58,7 @@ python -m request_pipeline.run
 3. 분석 도중 종료되어 오래된 `PROCESSING`으로 남아도 다음 실행에서 `RETRY`로 복구합니다.
 4. 분석 API가 성공한 뒤 DB 반영 전에 종료되더라도 같은 `request_id`로 재호출합니다. `report-search` 내부 API의 request_id 멱등성에 의해 중복 결과 생성을 방지합니다.
 5. 비대상 메일은 `IGNORED`로 확정하여 복구 대상에서 제외합니다.
-6. MySQL advisory lock을 획득한 실행만 처리하므로, 스케줄이 겹쳐도 두 프로세스가 같은 요청을 동시에 처리하지 않습니다.
+6. MySQL advisory lock을 획득한 실행만 테이블 이전, 스키마 확인 및 메일 처리를 수행합니다.
 7. MySQL 연결이 끊기면 advisory lock은 자동 해제되므로 강제 종료 이후 다음 스케줄이 다시 실행될 수 있습니다.
 
 다만 POP3 서버에서 메일이 다음 수집 전에 삭제되지 않고 보관되어야 합니다. 다른 POP3 클라이언트가 서버 메일을 삭제하는 설정은 사용하지 않아야 합니다.
