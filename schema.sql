@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS ae_llm_agent_api_profile (
     headers_json JSON NULL,
     request_template_json JSON NOT NULL,
     response_config_json JSON NOT NULL,
+    instruction_template LONGTEXT NULL,
     connect_timeout_seconds INT NULL,
     read_timeout_seconds INT NULL,
     verify_ssl TINYINT(1) NULL,
