@@ -14,9 +14,10 @@ def _is_gateway_block(response: requests.Response) -> bool:
     if response.status_code != 403:
         return False
 
+    reason = response.reason or ""
     body = response.text or ""
     return (
-        "New_All_deny_Page" in response.reason
+        "New_All_deny_Page" in reason
         or "mwg-internal" in body
         or "User-define" in body
     )
