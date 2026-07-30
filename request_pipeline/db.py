@@ -11,6 +11,7 @@ from request_pipeline.mail_parser import ParsedMail
 
 MAIL_TABLE = "ae_llm_agent_mail"
 RULE_TABLE = "ae_llm_agent_mail_rule"
+API_PROFILE_TABLE = "ae_llm_agent_api_profile"
 LEGACY_MAIL_TABLE = "request_mail"
 
 
@@ -27,11 +28,9 @@ def connect(settings: Settings):
 
 @contextmanager
 def pipeline_lock(settings: Settings) -> Iterator[bool]:
-    """MySQL advisory lock으로 스케줄러 중복 실행을 방지합니다."""
     conn = connect(settings)
     cur = conn.cursor()
     acquired = False
-
     try:
         cur.execute(
             "SELECT GET_LOCK(%s, %s)",
@@ -71,18 +70,14 @@ def _existing_mail_tables(settings: Settings) -> set[str]:
 
 
 def migrate_legacy_table(settings: Settings) -> bool:
-    """기존 request_mail만 존재하면 ae_llm_agent_mail로 이름을 변경합니다."""
     existing = _existing_mail_tables(settings)
-
     if MAIL_TABLE in existing and LEGACY_MAIL_TABLE in existing:
         raise RuntimeError(
             f"Both {LEGACY_MAIL_TABLE} and {MAIL_TABLE} exist. "
             "Reconcile the tables manually before running the pipeline."
         )
-
     if LEGACY_MAIL_TABLE not in existing:
         return False
-
     conn = connect(settings)
     cur = conn.cursor()
     try:
@@ -100,8 +95,7 @@ def _column_exists(settings: Settings, table_name: str, column_name: str) -> boo
     try:
         cur.execute(
             """
-            SELECT 1
-            FROM information_schema.columns
+            SELECT 1 FROM information_schema.columns
             WHERE table_schema=%s AND table_name=%s AND column_name=%s
             LIMIT 1
             """,
@@ -119,8 +113,7 @@ def _index_exists(settings: Settings, table_name: str, index_name: str) -> bool:
     try:
         cur.execute(
             """
-            SELECT 1
-            FROM information_schema.statistics
+            SELECT 1 FROM information_schema.statistics
             WHERE table_schema=%s AND table_name=%s AND index_name=%s
             LIMIT 1
             """,
@@ -150,7 +143,6 @@ def _ensure_mail_route_columns(settings: Settings) -> None:
         "attachment_count": "INT NULL AFTER `sharedworkspace_path`",
         "saved_at": "DATETIME NULL AFTER `attachment_count`",
     }
-
     conn = connect(settings)
     cur = conn.cursor()
     try:
@@ -184,7 +176,6 @@ def _ensure_mail_route_columns(settings: Settings) -> None:
 
 
 def _backfill_legacy_api_routes(settings: Settings) -> int:
-    """기존 request-pipeline 대상 행을 API_ANALYSIS 경로로 한 번만 보정합니다."""
     conn = connect(settings)
     cur = conn.cursor()
     try:
@@ -195,6 +186,7 @@ def _backfill_legacy_api_routes(settings: Settings) -> int:
                 route_case='DEFECT_ANALYSIS_REQUEST',
                 route_rule_key='api_defect_analysis_v1',
                 route_rule_version=1,
+                route_action_json=JSON_OBJECT('api_profile','defect-analysis'),
                 route_reason='Backfilled from legacy request-pipeline record',
                 classified_at=COALESCE(classified_at, created_at)
             WHERE route_type='UNCLASSIFIED'
@@ -228,25 +220,49 @@ def ensure_schema(settings: Settings) -> dict[str, int]:
     return {"backfilled_api_routes": backfilled}
 
 
+def _decode_json_fields(row: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
+    for field in fields:
+        value = row.get(field)
+        if isinstance(value, str):
+            row[field] = json.loads(value)
+    return row
+
+
 def list_enabled_rules(settings: Settings) -> list[dict[str, Any]]:
     conn = connect(settings)
     cur = conn.cursor(dictionary=True)
     try:
         cur.execute(
-            f"""
-            SELECT *
-            FROM `{RULE_TABLE}`
-            WHERE enabled=1
-            ORDER BY priority ASC, id ASC
-            """
+            f"SELECT * FROM `{RULE_TABLE}` WHERE enabled=1 ORDER BY priority, id"
         )
-        rows = cur.fetchall()
-        for row in rows:
-            for key in ("match_config_json", "action_config_json"):
-                value = row.get(key)
-                if isinstance(value, str):
-                    row[key] = json.loads(value)
-        return rows
+        return [
+            _decode_json_fields(row, ("match_config_json", "action_config_json"))
+            for row in cur.fetchall()
+        ]
+    finally:
+        cur.close()
+        conn.close()
+
+
+def get_api_profile(settings: Settings, profile_key: str) -> dict[str, Any]:
+    conn = connect(settings)
+    cur = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            f"""
+            SELECT * FROM `{API_PROFILE_TABLE}`
+            WHERE profile_key=%s AND enabled=1
+            LIMIT 1
+            """,
+            (profile_key,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise RuntimeError(f"Enabled API profile not found: {profile_key}")
+        return _decode_json_fields(
+            row,
+            ("headers_json", "request_template_json", "response_config_json"),
+        )
     finally:
         cur.close()
         conn.close()
@@ -256,10 +272,7 @@ def uidl_exists(settings: Settings, uidl: str) -> bool:
     conn = connect(settings)
     cur = conn.cursor()
     try:
-        cur.execute(
-            f"SELECT 1 FROM `{MAIL_TABLE}` WHERE uidl=%s LIMIT 1",
-            (uidl,),
-        )
+        cur.execute(f"SELECT 1 FROM `{MAIL_TABLE}` WHERE uidl=%s LIMIT 1", (uidl,))
         return cur.fetchone() is not None
     finally:
         cur.close()
@@ -275,7 +288,6 @@ def insert_received(
     route_case: str = "DEFECT_ANALYSIS_REQUEST",
     route_rule_key: str = "api_defect_analysis_v1",
 ) -> int:
-    """레거시 POP3 수집 호환용. 신규 중앙 collector는 직접 라우팅 정보를 적재합니다."""
     conn = connect(settings)
     cur = conn.cursor()
     try:
@@ -287,11 +299,11 @@ def insert_received(
                 sender_email, requester_user_id, reply_to_email,
                 original_recipient_email, mail_sent_at,
                 route_type, route_case, route_rule_key, route_rule_version,
-                route_reason, classified_at, status, send_status
+                route_action_json, route_reason, classified_at, status, send_status
             ) VALUES(
                 %s,'POP3',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                %s,%s,%s,1,'Legacy request-pipeline POP3 classification',NOW(),
-                'ROUTED','NOT_READY'
+                %s,%s,%s,1,JSON_OBJECT('api_profile','defect-analysis'),
+                'Legacy request-pipeline POP3 classification',NOW(),'ROUTED','NOT_READY'
             )
             """,
             (
@@ -335,13 +347,11 @@ def find_duplicate(
         cur.execute(
             f"""
             SELECT id FROM `{MAIL_TABLE}`
-            WHERE id<>%s
-              AND subject_hash=%s
+            WHERE id<>%s AND subject_hash=%s
               AND route_type='API_ANALYSIS'
               AND status IN ('PROCESSING','COMPLETED')
               AND COALESCE(mail_sent_at, received_at) BETWEEN %s AND %s
-            ORDER BY COALESCE(mail_sent_at, received_at) ASC
-            LIMIT 1
+            ORDER BY COALESCE(mail_sent_at, received_at) ASC LIMIT 1
             """,
             (request_id, subject_hash, lower_bound, reference_time),
         )
@@ -353,37 +363,21 @@ def find_duplicate(
 
 
 def mark_ignored(settings: Settings, request_id: int) -> None:
-    _update(
-        settings,
-        request_id,
-        route_type="IGNORE",
-        status="IGNORED",
-        send_status="NOT_READY",
-        last_error=None,
-    )
+    _update(settings, request_id, route_type="IGNORE", status="IGNORED", send_status="NOT_READY", last_error=None)
 
 
 def mark_duplicate(settings: Settings, request_id: int, duplicate_of: int) -> None:
-    _update(
-        settings,
-        request_id,
-        status="DUPLICATE",
-        duplicate_of=duplicate_of,
-        send_status="NOT_READY",
-    )
+    _update(settings, request_id, status="DUPLICATE", duplicate_of=duplicate_of, send_status="NOT_READY")
 
 
 def claim_api_request(settings: Settings, request_id: int) -> bool:
-    """API 경로 행만 원자적으로 PROCESSING으로 전환합니다."""
     conn = connect(settings)
     cur = conn.cursor()
     try:
         cur.execute(
             f"""
-            UPDATE `{MAIL_TABLE}`
-            SET status='PROCESSING', last_error=NULL
-            WHERE id=%s
-              AND route_type='API_ANALYSIS'
+            UPDATE `{MAIL_TABLE}` SET status='PROCESSING', last_error=NULL
+            WHERE id=%s AND route_type='API_ANALYSIS'
               AND status IN ('ROUTED','RETRY')
             """,
             (request_id,),
@@ -403,9 +397,7 @@ def mark_completed(settings: Settings, request_id: int, result: dict[str, Any]) 
         request_id,
         status="COMPLETED",
         answer_text=result.get("answer_text"),
-        search_results_json=json.dumps(
-            result.get("search_results") or [], ensure_ascii=False
-        ),
+        search_results_json=json.dumps(result.get("search_results") or [], ensure_ascii=False),
         chat_session_id=trace.get("session_id"),
         chat_turn_artifact_id=trace.get("turn_artifact_id"),
         chat_search_log_id=trace.get("search_log_id"),
@@ -422,8 +414,7 @@ def mark_retry(settings: Settings, request_id: int, error: str) -> None:
             f"""
             UPDATE `{MAIL_TABLE}`
             SET status=IF(retry_count+1 >= %s,'FAILED','RETRY'),
-                retry_count=retry_count+1,
-                last_error=%s
+                retry_count=retry_count+1, last_error=%s
             WHERE id=%s AND route_type='API_ANALYSIS'
             """,
             (settings.max_retry_count, error[:4000], request_id),
@@ -435,7 +426,6 @@ def mark_retry(settings: Settings, request_id: int, error: str) -> None:
 
 
 def recover_incomplete_requests(settings: Settings) -> dict[str, int]:
-    """API worker가 맡은 오래된 PROCESSING 요청만 RETRY로 복구합니다."""
     conn = connect(settings)
     cur = conn.cursor()
     try:
@@ -444,8 +434,7 @@ def recover_incomplete_requests(settings: Settings) -> dict[str, int]:
             UPDATE `{MAIL_TABLE}`
             SET status='RETRY',
                 last_error='Recovered stale API PROCESSING request after scheduler interruption'
-            WHERE route_type='API_ANALYSIS'
-              AND status='PROCESSING'
+            WHERE route_type='API_ANALYSIS' AND status='PROCESSING'
               AND updated_at < DATE_SUB(NOW(), INTERVAL %s MINUTE)
               AND retry_count < %s
             """,
@@ -465,8 +454,7 @@ def list_api_ready(settings: Settings, limit: int) -> list[dict[str, Any]]:
     try:
         cur.execute(
             f"""
-            SELECT *
-            FROM `{MAIL_TABLE}`
+            SELECT * FROM `{MAIL_TABLE}`
             WHERE route_type='API_ANALYSIS'
               AND status IN ('ROUTED','RETRY')
               AND retry_count < %s
@@ -475,7 +463,11 @@ def list_api_ready(settings: Settings, limit: int) -> list[dict[str, Any]]:
             """,
             (settings.max_retry_count, limit),
         )
-        return cur.fetchall()
+        rows = cur.fetchall()
+        return [
+            _decode_json_fields(row, ("route_action_json", "route_matches_json"))
+            for row in rows
+        ]
     finally:
         cur.close()
         conn.close()
