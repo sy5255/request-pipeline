@@ -36,6 +36,15 @@ class Settings:
     max_analysis_per_run: int = int(os.getenv("MAX_ANALYSIS_PER_RUN", "3"))
     analysis_interval_seconds: float = float(os.getenv("ANALYSIS_INTERVAL_SECONDS", "3"))
 
+    # 비정상 종료로 남은 PROCESSING 요청을 다음 실행에서 복구하기 위한 기준입니다.
+    stale_processing_minutes: int = int(os.getenv("STALE_PROCESSING_MINUTES", "15"))
+
+    # 여러 스케줄러가 동시에 실행되어 같은 메일을 처리하는 것을 방지합니다.
+    pipeline_lock_name: str = os.getenv(
+        "PIPELINE_LOCK_NAME", "request_pipeline_scheduler"
+    ).strip()
+    pipeline_lock_wait_seconds: int = int(os.getenv("PIPELINE_LOCK_WAIT_SECONDS", "0"))
+
     report_search_base_url: str = os.getenv(
         "REPORT_SEARCH_BASE_URL",
         "https://ae-llm-agent--fa-report-search-prod.cdep1.ss.net",
@@ -75,6 +84,12 @@ class Settings:
             raise RuntimeError("MAX_ANALYSIS_PER_RUN must be at least 1")
         if self.analysis_interval_seconds < 0:
             raise RuntimeError("ANALYSIS_INTERVAL_SECONDS must be 0 or greater")
+        if self.stale_processing_minutes < 1:
+            raise RuntimeError("STALE_PROCESSING_MINUTES must be at least 1")
+        if not self.pipeline_lock_name or len(self.pipeline_lock_name) > 64:
+            raise RuntimeError("PIPELINE_LOCK_NAME must contain 1 to 64 characters")
+        if self.pipeline_lock_wait_seconds < 0:
+            raise RuntimeError("PIPELINE_LOCK_WAIT_SECONDS must be 0 or greater")
 
 
 settings = Settings()
