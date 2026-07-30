@@ -1,4 +1,5 @@
 import logging
+import time
 
 from request_pipeline import db
 from request_pipeline.config import settings
@@ -13,7 +14,8 @@ logging.basicConfig(
 logger = logging.getLogger("request_pipeline")
 
 
-def _analyze_row(row: dict) -> None:
+def _analyze_row(row: dict) -> bool:
+    """요청 한 건을 분석하고 성공 여부를 반환합니다."""
     request_id = int(row["id"])
     try:
         db.mark_processing(settings, request_id)
@@ -27,17 +29,53 @@ def _analyze_row(row: dict) -> None:
         )
         db.mark_completed(settings, request_id, result)
         logger.info("analysis completed request_id=%s", request_id)
+        return True
     except Exception as exc:
         db.mark_retry(settings, request_id, str(exc))
         logger.exception("analysis failed request_id=%s", request_id)
+        return False
 
 
-def retry_failed_analysis() -> None:
-    for row in db.list_retry(settings):
-        _analyze_row(row)
+def _wait_before_next_request(processed_count: int, limit: int) -> None:
+    """다음 API 호출이 남아 있을 때만 호출 간격을 둡니다."""
+    if processed_count < limit and settings.analysis_interval_seconds > 0:
+        time.sleep(settings.analysis_interval_seconds)
 
 
-def collect_and_process_new_mail() -> None:
+def retry_failed_analysis(limit: int) -> int:
+    """RETRY 건을 제한된 수만 처리하고, 첫 실패 시 이번 실행을 중단합니다."""
+    rows = db.list_retry(settings)
+    target_rows = rows[:limit]
+
+    logger.info(
+        "pending retry count=%s processing_limit=%s",
+        len(rows),
+        len(target_rows),
+    )
+
+    processed_count = 0
+    for row in target_rows:
+        if not _analyze_row(row):
+            logger.warning(
+                "retry processing stopped after failure request_id=%s",
+                row["id"],
+            )
+            break
+
+        processed_count += 1
+        _wait_before_next_request(processed_count, len(target_rows))
+
+    return processed_count
+
+
+def collect_and_process_new_mail(limit: int) -> int:
+    """신규 대상 메일을 제한된 수만 분석하고, 첫 실패 시 추가 호출을 중단합니다."""
+    if limit <= 0:
+        logger.info("new mail analysis skipped because run limit was reached")
+        return 0
+
+    analyzed_count = 0
+
     for raw_mail in iter_messages(settings):
         if db.uidl_exists(settings, raw_mail.uidl):
             continue
@@ -48,6 +86,7 @@ def collect_and_process_new_mail() -> None:
         if parsed.request_title is None:
             logger.info("ignored non-target mail request_id=%s", request_id)
             continue
+
         if not parsed.sender_email or not parsed.requester_user_id:
             db.mark_retry(settings, request_id, "Sender email is missing")
             continue
@@ -63,13 +102,31 @@ def collect_and_process_new_mail() -> None:
             logger.info("duplicate request_id=%s duplicate_of=%s", request_id, duplicate_of)
             continue
 
-        _analyze_row({
-            "id": request_id,
-            "requester_user_id": parsed.requester_user_id,
-            "sender_email": parsed.sender_email,
-            "request_title": parsed.request_title,
-            "mail_body": parsed.mail_body,
-        })
+        success = _analyze_row(
+            {
+                "id": request_id,
+                "requester_user_id": parsed.requester_user_id,
+                "sender_email": parsed.sender_email,
+                "request_title": parsed.request_title,
+                "mail_body": parsed.mail_body,
+            }
+        )
+
+        if not success:
+            logger.warning(
+                "new mail processing stopped after failure request_id=%s",
+                request_id,
+            )
+            break
+
+        analyzed_count += 1
+        if analyzed_count >= limit:
+            logger.info("new mail analysis limit reached max=%s", limit)
+            break
+
+        _wait_before_next_request(analyzed_count, limit)
+
+    return analyzed_count
 
 
 def process_pending_send() -> None:
@@ -82,9 +139,19 @@ def process_pending_send() -> None:
 def main() -> None:
     settings.validate()
     db.ensure_schema(settings)
-    retry_failed_analysis()
+
+    retry_count = retry_failed_analysis(settings.max_analysis_per_run)
+    remaining_limit = settings.max_analysis_per_run - retry_count
+
     process_pending_send()
-    collect_and_process_new_mail()
+    new_count = collect_and_process_new_mail(remaining_limit)
+
+    logger.info(
+        "pipeline finished retry_completed=%s new_completed=%s max_per_run=%s",
+        retry_count,
+        new_count,
+        settings.max_analysis_per_run,
+    )
 
 
 if __name__ == "__main__":
