@@ -36,14 +36,18 @@ def _analyze_row(row: dict) -> bool:
         return False
 
 
-def _wait_before_next_request(processed_count: int, limit: int) -> None:
-    """다음 API 호출이 남아 있을 때만 호출 간격을 둡니다."""
-    if processed_count < limit and settings.analysis_interval_seconds > 0:
+def _sleep_between_requests() -> None:
+    if settings.analysis_interval_seconds > 0:
         time.sleep(settings.analysis_interval_seconds)
 
 
-def retry_failed_analysis(limit: int) -> int:
-    """RETRY 건을 제한된 수만 처리하고, 첫 실패 시 이번 실행을 중단합니다."""
+def retry_failed_analysis(limit: int) -> tuple[int, bool]:
+    """
+    RETRY 건을 제한된 수만 처리합니다.
+
+    반환값의 두 번째 값이 False이면 첫 실패가 발생한 것이므로
+    이번 실행에서는 신규 메일 분석도 진행하지 않습니다.
+    """
     rows = db.list_retry(settings)
     target_rows = rows[:limit]
 
@@ -54,18 +58,19 @@ def retry_failed_analysis(limit: int) -> int:
     )
 
     processed_count = 0
-    for row in target_rows:
+    for index, row in enumerate(target_rows):
         if not _analyze_row(row):
             logger.warning(
                 "retry processing stopped after failure request_id=%s",
                 row["id"],
             )
-            break
+            return processed_count, False
 
         processed_count += 1
-        _wait_before_next_request(processed_count, len(target_rows))
+        if index < len(target_rows) - 1:
+            _sleep_between_requests()
 
-    return processed_count
+    return processed_count, True
 
 
 def collect_and_process_new_mail(limit: int) -> int:
@@ -124,7 +129,7 @@ def collect_and_process_new_mail(limit: int) -> int:
             logger.info("new mail analysis limit reached max=%s", limit)
             break
 
-        _wait_before_next_request(analyzed_count, limit)
+        _sleep_between_requests()
 
     return analyzed_count
 
@@ -140,10 +145,19 @@ def main() -> None:
     settings.validate()
     db.ensure_schema(settings)
 
-    retry_count = retry_failed_analysis(settings.max_analysis_per_run)
+    retry_count, retry_succeeded = retry_failed_analysis(settings.max_analysis_per_run)
+    process_pending_send()
+
+    if not retry_succeeded:
+        logger.warning("pipeline stopped because a retry request failed")
+        return
+
     remaining_limit = settings.max_analysis_per_run - retry_count
 
-    process_pending_send()
+    # RETRY 성공 직후 신규 API 호출이 이어질 때도 동일한 간격을 보장합니다.
+    if retry_count > 0 and remaining_limit > 0:
+        _sleep_between_requests()
+
     new_count = collect_and_process_new_mail(remaining_limit)
 
     logger.info(
