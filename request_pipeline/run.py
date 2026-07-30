@@ -17,6 +17,7 @@ logger = logging.getLogger("request_pipeline")
 def _analyze_row(row: dict) -> bool:
     """요청 한 건을 분석하고 성공 여부를 반환합니다."""
     request_id = int(row["id"])
+
     try:
         db.mark_processing(settings, request_id)
         result = analyze_request(
@@ -89,6 +90,7 @@ def collect_and_process_new_mail(limit: int) -> int:
         request_id = db.insert_received(settings, raw_mail.uidl, parsed)
 
         if parsed.request_title is None:
+            db.mark_ignored(settings, request_id)
             logger.info("ignored non-target mail request_id=%s", request_id)
             continue
 
@@ -104,7 +106,11 @@ def collect_and_process_new_mail(limit: int) -> int:
         )
         if duplicate_of:
             db.mark_duplicate(settings, request_id, duplicate_of)
-            logger.info("duplicate request_id=%s duplicate_of=%s", request_id, duplicate_of)
+            logger.info(
+                "duplicate request_id=%s duplicate_of=%s",
+                request_id,
+                duplicate_of,
+            )
             continue
 
         success = _analyze_row(
@@ -141,9 +147,15 @@ def process_pending_send() -> None:
         logger.warning("MAIL_SEND_ENABLED=true지만 발송 모듈은 아직 구현되지 않았습니다.")
 
 
-def main() -> None:
-    settings.validate()
-    db.ensure_schema(settings)
+def _run_once() -> None:
+    recovery = db.recover_incomplete_requests(settings)
+    if any(recovery.values()):
+        logger.warning(
+            "recovered incomplete requests received=%s processing=%s ignored=%s",
+            recovery["received"],
+            recovery["processing"],
+            recovery["ignored"],
+        )
 
     retry_count, retry_succeeded = retry_failed_analysis(settings.max_analysis_per_run)
     process_pending_send()
@@ -166,6 +178,23 @@ def main() -> None:
         new_count,
         settings.max_analysis_per_run,
     )
+
+
+def main() -> None:
+    settings.validate()
+    db.ensure_schema(settings)
+
+    # MySQL advisory lock은 연결이 끊기면 자동 해제되므로 프로세스 강제 종료에도 안전합니다.
+    with db.pipeline_lock(settings) as acquired:
+        if not acquired:
+            logger.warning(
+                "another pipeline run is active; current run skipped lock=%s",
+                settings.pipeline_lock_name,
+            )
+            return
+
+        logger.info("pipeline lock acquired lock=%s", settings.pipeline_lock_name)
+        _run_once()
 
 
 if __name__ == "__main__":
