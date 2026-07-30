@@ -14,6 +14,8 @@ IFA Curator 요청 메일을 POP3로 수집하고 `report-search` 내부 분석 
 - 실패 건 재시도
 - 실행당 분석 건수 제한 및 호출 간격 적용
 - 첫 분석 실패 시 해당 실행 즉시 중단
+- 비정상 종료 후 미완료 요청 자동 복구
+- MySQL advisory lock 기반 중복 실행 방지
 - 메일 발송 완전 차단 상태
 
 Raw EML과 첨부파일은 파일시스템에 저장하지 않습니다.
@@ -26,7 +28,43 @@ pip install -r requirements.txt
 python -m request_pipeline.run
 ```
 
-스케줄러에는 위 명령 하나만 등록합니다.
+스케줄러에는 위 명령 하나만 등록합니다. 프로세스를 하루 종일 실행할 필요는 없으며, 주기 실행할 때 UIDL과 DB 상태를 기준으로 이전 처리 지점부터 이어서 처리합니다.
+
+## 무누락 처리 보장 방식
+
+이 프로젝트는 메일을 메모리 위치가 아니라 POP3 UIDL과 MySQL 상태로 추적합니다.
+
+1. POP3에서 조회한 UIDL이 DB에 없으면 신규 메일로 저장합니다.
+2. DB 저장 직후 프로세스가 종료되어 `RECEIVED`로 남아도 다음 실행에서 `RETRY`로 복구합니다.
+3. 분석 도중 종료되어 오래된 `PROCESSING`으로 남아도 다음 실행에서 `RETRY`로 복구합니다.
+4. 분석 API가 성공한 뒤 DB 반영 전에 종료되더라도 같은 `request_id`로 재호출합니다. `report-search` 내부 API의 request_id 멱등성에 의해 중복 결과 생성을 방지합니다.
+5. 비대상 메일은 `IGNORED`로 확정하여 복구 대상에서 제외합니다.
+6. MySQL advisory lock을 획득한 실행만 처리하므로, 스케줄이 겹쳐도 두 프로세스가 같은 요청을 동시에 처리하지 않습니다.
+7. MySQL 연결이 끊기면 advisory lock은 자동 해제되므로 강제 종료 이후 다음 스케줄이 다시 실행될 수 있습니다.
+
+다만 POP3 서버에서 메일이 다음 수집 전에 삭제되지 않고 보관되어야 합니다. 다른 POP3 클라이언트가 서버 메일을 삭제하는 설정은 사용하지 않아야 합니다.
+
+## 장애 복구 설정
+
+```env
+STALE_PROCESSING_MINUTES=15
+PIPELINE_LOCK_NAME=request_pipeline_scheduler
+PIPELINE_LOCK_WAIT_SECONDS=0
+```
+
+- `STALE_PROCESSING_MINUTES`: 이 시간보다 오래된 `PROCESSING` 요청을 중단된 실행으로 판단합니다.
+- `PIPELINE_LOCK_NAME`: 같은 DB를 사용하는 모든 스케줄러 인스턴스가 공유할 lock 이름입니다.
+- `PIPELINE_LOCK_WAIT_SECONDS=0`: 이미 다른 실행이 동작 중이면 기다리지 않고 현재 실행을 정상 종료합니다.
+
+## 한 시간 주기 실행 예시
+
+Linux cron 예시:
+
+```cron
+0 * * * * cd /config/work/request-pipeline && /usr/bin/python -m request_pipeline.run >> /config/work/request-pipeline/pipeline.log 2>&1
+```
+
+중복 실행 방지는 애플리케이션 내부의 MySQL advisory lock이 담당하므로 별도의 `flock` 없이도 동작합니다. 운영 환경에서 이중 보호를 원하면 `flock`을 추가해도 됩니다.
 
 ## 분석 API 호출 보호 설정
 
@@ -39,11 +77,13 @@ ANALYSIS_INTERVAL_SECONDS=3
 
 동작 방식은 다음과 같습니다.
 
-1. `RETRY` 상태 요청을 먼저 최대 설정 건수까지 처리합니다.
+1. 복구된 요청을 포함한 `RETRY` 상태 요청을 먼저 최대 설정 건수까지 처리합니다.
 2. RETRY 처리 후 남은 한도만큼 신규 메일을 분석합니다.
 3. 분석 API 호출 사이에 설정한 시간만큼 대기합니다.
 4. 한 건이라도 실패하면 추가 API 호출을 중단합니다.
 5. 다음 스케줄 실행에서 남은 요청을 이어서 처리합니다.
+
+시간당 대상 메일 유입량이 `MAX_ANALYSIS_PER_RUN`보다 많으면 적체될 수 있으므로 운영 유입량에 맞춰 값을 조정해야 합니다.
 
 ## HTTPS 인증서 설정
 
