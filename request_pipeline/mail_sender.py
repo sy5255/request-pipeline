@@ -95,23 +95,46 @@ def build_contents(row: dict[str, Any]) -> str:
     ).strip()
 
 
+def build_recipients(
+    settings: Settings,
+    primary_recipient: str,
+) -> list[dict[str, str]]:
+    """주 수신자와 Knox 발송 계정을 TO로 포함하고 중복 주소를 제거합니다."""
+    addresses = [
+        _valid_email(primary_recipient),
+        _valid_email(settings.knox_mail_sender_email),
+    ]
+
+    recipients: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for address in addresses:
+        normalized = address.casefold()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        recipients.append(
+            {
+                "emailAddress": address,
+                "recipientType": "TO",
+            }
+        )
+
+    return recipients
+
+
 def build_payload(
     settings: Settings,
     row: dict[str, Any],
     recipient: str,
 ) -> dict[str, Any]:
+    sender_email = _valid_email(settings.knox_mail_sender_email)
     return {
         "subject": build_subject(settings, row),
         "docSecuType": settings.knox_mail_doc_secu_type,
         "contents": build_contents(row),
         "contentType": settings.knox_mail_content_type,
-        "sender": {"emailAddress": _valid_email(settings.knox_mail_sender_email)},
-        "recipients": [
-            {
-                "emailAddress": recipient,
-                "recipientType": "TO",
-            }
-        ],
+        "sender": {"emailAddress": sender_email},
+        "recipients": build_recipients(settings, recipient),
     }
 
 
