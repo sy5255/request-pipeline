@@ -59,16 +59,44 @@ class Settings:
     report_search_verify_ssl: bool = _bool("REPORT_SEARCH_VERIFY_SSL", False)
     report_search_ca_bundle: str = os.getenv("REPORT_SEARCH_CA_BUNDLE", "").strip()
 
+    # MAIL_SEND_ENABLED=false이면 분석 파이프라인은 계속 동작하고 메일 발송만 중단됩니다.
     mail_send_enabled: bool = _bool("MAIL_SEND_ENABLED", False)
-    mail_recipient_mode: str = os.getenv("MAIL_RECIPIENT_MODE", "TEST").upper()
-    mail_test_recipient: str = os.getenv("MAIL_TEST_RECIPIENT", "")
+    mail_recipient_mode: str = os.getenv("MAIL_RECIPIENT_MODE", "TEST").strip().upper()
+    mail_test_recipient: str = os.getenv("MAIL_TEST_RECIPIENT", "").strip()
     mail_allow_original_recipient: bool = _bool("MAIL_ALLOW_ORIGINAL_RECIPIENT", False)
+    mail_send_batch_size: int = int(os.getenv("MAIL_SEND_BATCH_SIZE", "1"))
+    mail_send_stale_minutes: int = int(os.getenv("MAIL_SEND_STALE_MINUTES", "15"))
+    mail_subject_prefix: str = os.getenv(
+        "MAIL_SUBJECT_PREFIX", "[IFA Curator 분석 결과]"
+    ).strip()
+
+    knox_mail_api_url: str = os.getenv("KNOX_MAIL_API_URL", "").strip()
+    knox_mail_user_id: str = os.getenv("KNOX_MAIL_USER_ID", "agent").strip()
+    knox_mail_auth_token: str = os.getenv("KNOX_MAIL_AUTH_TOKEN", "").strip()
+    knox_mail_system_id: str = os.getenv("KNOX_MAIL_SYSTEM_ID", "").strip()
+    knox_mail_sender_email: str = os.getenv("KNOX_MAIL_SENDER_EMAIL", "").strip()
+    knox_mail_doc_secu_type: str = os.getenv(
+        "KNOX_MAIL_DOC_SECU_TYPE", "PERSONAL"
+    ).strip().upper()
+    knox_mail_content_type: str = os.getenv(
+        "KNOX_MAIL_CONTENT_TYPE", "TEXT"
+    ).strip().upper()
+    knox_mail_connect_timeout: int = int(os.getenv("KNOX_MAIL_CONNECT_TIMEOUT", "10"))
+    knox_mail_read_timeout: int = int(os.getenv("KNOX_MAIL_READ_TIMEOUT", "30"))
+    knox_mail_verify_ssl: bool = _bool("KNOX_MAIL_VERIFY_SSL", True)
+    knox_mail_ca_bundle: str = os.getenv("KNOX_MAIL_CA_BUNDLE", "").strip()
 
     @property
     def report_search_verify(self) -> bool | str:
         if self.report_search_ca_bundle:
             return self.report_search_ca_bundle
         return self.report_search_verify_ssl
+
+    @property
+    def knox_mail_verify(self) -> bool | str:
+        if self.knox_mail_ca_bundle:
+            return self.knox_mail_ca_bundle
+        return self.knox_mail_verify_ssl
 
     def validate(self) -> None:
         required = {
@@ -89,6 +117,18 @@ class Settings:
                 }
             )
 
+        if self.mail_send_enabled:
+            required.update(
+                {
+                    "KNOX_MAIL_API_URL": self.knox_mail_api_url,
+                    "KNOX_MAIL_AUTH_TOKEN": self.knox_mail_auth_token,
+                    "KNOX_MAIL_SYSTEM_ID": self.knox_mail_system_id,
+                    "KNOX_MAIL_SENDER_EMAIL": self.knox_mail_sender_email,
+                }
+            )
+            if self.mail_recipient_mode == "TEST":
+                required["MAIL_TEST_RECIPIENT"] = self.mail_test_recipient
+
         missing = [name for name, value in required.items() if not value]
         if missing:
             raise RuntimeError(f"Missing required settings: {', '.join(missing)}")
@@ -102,6 +142,21 @@ class Settings:
             raise RuntimeError("PIPELINE_LOCK_NAME must contain 1 to 64 characters")
         if self.pipeline_lock_wait_seconds < 0:
             raise RuntimeError("PIPELINE_LOCK_WAIT_SECONDS must be 0 or greater")
+        if self.mail_recipient_mode not in {"TEST", "ORIGINAL"}:
+            raise RuntimeError("MAIL_RECIPIENT_MODE must be TEST or ORIGINAL")
+        if self.mail_send_enabled and self.mail_recipient_mode == "ORIGINAL":
+            if not self.mail_allow_original_recipient:
+                raise RuntimeError(
+                    "MAIL_ALLOW_ORIGINAL_RECIPIENT=true is required for ORIGINAL mode"
+                )
+        if self.mail_send_batch_size < 1:
+            raise RuntimeError("MAIL_SEND_BATCH_SIZE must be at least 1")
+        if self.mail_send_stale_minutes < 1:
+            raise RuntimeError("MAIL_SEND_STALE_MINUTES must be at least 1")
+        if self.knox_mail_connect_timeout < 1 or self.knox_mail_read_timeout < 1:
+            raise RuntimeError("Knox mail timeouts must be at least 1 second")
+        if self.knox_mail_content_type != "TEXT":
+            raise RuntimeError("KNOX_MAIL_CONTENT_TYPE currently supports TEXT only")
 
 
 settings = Settings()
