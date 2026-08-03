@@ -8,6 +8,7 @@ from request_pipeline.mail_sender import (
     MailSendUnknownError,
     build_contents,
     build_payload,
+    build_recipients,
     markdown_to_text,
     resolve_recipient,
     send_analysis_mail,
@@ -89,12 +90,32 @@ def test_markdown_links_are_converted_for_text_mail():
     assert "보고서 열기: https://edm.example/report/1" in result
 
 
-def test_payload_uses_only_resolved_recipient():
+def test_recipients_include_primary_and_knox_sender():
+    recipients = build_recipients(_settings(), "tester@example.com")
+
+    assert recipients == [
+        {"emailAddress": "tester@example.com", "recipientType": "TO"},
+        {"emailAddress": "agent@example.com", "recipientType": "TO"},
+    ]
+
+
+def test_recipients_remove_duplicate_sender_address_case_insensitively():
+    settings = _settings(knox_mail_sender_email="Agent@Example.com")
+
+    recipients = build_recipients(settings, "agent@example.com")
+
+    assert recipients == [
+        {"emailAddress": "agent@example.com", "recipientType": "TO"}
+    ]
+
+
+def test_payload_includes_resolved_recipient_and_sender_copy():
     row = _row()
     payload = build_payload(_settings(), row, "tester@example.com")
 
     assert payload["recipients"] == [
-        {"emailAddress": "tester@example.com", "recipientType": "TO"}
+        {"emailAddress": "tester@example.com", "recipientType": "TO"},
+        {"emailAddress": "agent@example.com", "recipientType": "TO"},
     ]
     assert payload["sender"] == {"emailAddress": "agent@example.com"}
     assert "requester@example.com" not in str(payload["recipients"])
@@ -107,7 +128,7 @@ def test_contents_include_answer_and_plain_edm_url():
     assert "보고서 열기: https://edm.example/report/1" in contents
 
 
-def test_send_analysis_mail_calls_knox_api_with_test_recipient():
+def test_send_analysis_mail_calls_knox_api_with_sender_copy():
     with patch(
         "request_pipeline.mail_sender.requests.post",
         return_value=_response(),
@@ -117,7 +138,8 @@ def test_send_analysis_mail_calls_knox_api_with_test_recipient():
     assert result.mail_id == "mail-123"
     assert result.recipient == "tester@example.com"
     assert post.call_args.kwargs["json"]["recipients"] == [
-        {"emailAddress": "tester@example.com", "recipientType": "TO"}
+        {"emailAddress": "tester@example.com", "recipientType": "TO"},
+        {"emailAddress": "agent@example.com", "recipientType": "TO"},
     ]
     assert post.call_args.kwargs["headers"]["System-ID"] == "KC123"
 
