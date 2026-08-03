@@ -168,51 +168,80 @@ def process_pending_send() -> dict[str, int]:
     if recovered:
         logger.warning("recovered stale mail sends as SEND_UNKNOWN count=%s", recovered)
 
-    rows = mail_queue.list_send_ready(settings, settings.mail_send_batch_size)
-    counts["ready"] = len(rows)
-    logger.info(
-        "mail queue ready=%s batch_size=%s recipient_mode=%s",
-        len(rows),
-        settings.mail_send_batch_size,
-        settings.mail_recipient_mode,
-    )
+    batch_size = settings.mail_send_batch_size
+    after_id = 0
+    batch_number = 0
 
-    for row in rows:
-        request_id = int(row["id"])
-        if not mail_queue.claim_send(settings, request_id):
-            counts["skipped"] += 1
-            logger.info("mail claim skipped request_id=%s", request_id)
-            continue
+    while True:
+        rows = mail_queue.list_send_ready(
+            settings,
+            batch_size,
+            after_id=after_id,
+        )
+        if not rows:
+            if batch_number == 0:
+                logger.info(
+                    "mail queue ready=0 batch_size=%s recipient_mode=%s",
+                    batch_size,
+                    settings.mail_recipient_mode,
+                )
+            break
 
-        try:
-            result = send_analysis_mail(settings, row)
-            mail_queue.mark_sent(
-                settings,
-                request_id,
-                sent_mail_id=result.mail_id,
-                recipient=result.recipient,
-                response_json=result.response_json,
-            )
-            counts["sent"] += 1
-            logger.info(
-                "mail sent request_id=%s recipient=%s mode=%s mail_id=%s",
-                request_id,
-                result.recipient,
-                settings.mail_recipient_mode,
-                result.mail_id or "<not-returned>",
-            )
-        except MailSendUnknownError as exc:
-            mail_queue.mark_send_unknown(settings, request_id, str(exc))
-            counts["unknown"] += 1
-            logger.exception("mail send result unknown request_id=%s", request_id)
-        except MailSendError as exc:
-            mail_queue.mark_send_failed(settings, request_id, str(exc))
-            counts["failed"] += 1
-            logger.exception("mail send failed request_id=%s", request_id)
-        except Exception as exc:
-            mail_queue.mark_send_failed(settings, request_id, str(exc))
-            counts["failed"] += 1
-            logger.exception("mail preparation failed request_id=%s", request_id)
+        batch_number += 1
+        counts["ready"] += len(rows)
+        logger.info(
+            "mail queue batch=%s ready=%s batch_size=%s processed_total=%s "
+            "recipient_mode=%s",
+            batch_number,
+            len(rows),
+            batch_size,
+            counts["sent"] + counts["failed"] + counts["unknown"] + counts["skipped"],
+            settings.mail_recipient_mode,
+        )
+
+        for row in rows:
+            request_id = int(row["id"])
+            # 실패 후 SEND_BLOCKED로 돌아가더라도 같은 실행에서 재조회되지 않도록
+            # 조회 커서를 항상 전진시킵니다.
+            after_id = max(after_id, request_id)
+
+            if not mail_queue.claim_send(settings, request_id):
+                counts["skipped"] += 1
+                logger.info("mail claim skipped request_id=%s", request_id)
+                continue
+
+            try:
+                result = send_analysis_mail(settings, row)
+                mail_queue.mark_sent(
+                    settings,
+                    request_id,
+                    sent_mail_id=result.mail_id,
+                    recipient=result.recipient,
+                    response_json=result.response_json,
+                )
+                counts["sent"] += 1
+                logger.info(
+                    "mail sent request_id=%s recipient=%s mode=%s mail_id=%s",
+                    request_id,
+                    result.recipient,
+                    settings.mail_recipient_mode,
+                    result.mail_id or "<not-returned>",
+                )
+            except MailSendUnknownError as exc:
+                mail_queue.mark_send_unknown(settings, request_id, str(exc))
+                counts["unknown"] += 1
+                logger.exception("mail send result unknown request_id=%s", request_id)
+            except MailSendError as exc:
+                mail_queue.mark_send_failed(settings, request_id, str(exc))
+                counts["failed"] += 1
+                logger.exception("mail send failed request_id=%s", request_id)
+            except Exception as exc:
+                mail_queue.mark_send_failed(settings, request_id, str(exc))
+                counts["failed"] += 1
+                logger.exception("mail preparation failed request_id=%s", request_id)
+
+        if len(rows) < batch_size:
+            break
 
     return counts
 
@@ -235,10 +264,12 @@ def _run_once() -> None:
 
     logger.info(
         "pipeline finished legacy_collected=%s api_completed=%s "
-        "queue_batch_size=%s mail_sent=%s mail_failed=%s mail_unknown=%s",
+        "queue_batch_size=%s mail_ready=%s mail_sent=%s mail_failed=%s "
+        "mail_unknown=%s",
         legacy_collected,
         processed_count,
         settings.max_analysis_per_run,
+        mail_counts["ready"],
         mail_counts["sent"],
         mail_counts["failed"],
         mail_counts["unknown"],
