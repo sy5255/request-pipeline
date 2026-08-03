@@ -5,7 +5,10 @@ from request_pipeline import db
 from request_pipeline.config import Settings
 
 
-def list_send_blocked(settings: Settings, limit: int) -> list[dict[str, Any]]:
+SEND_READY_STATUSES = ("SEND_BLOCKED", "SEND_PENDING")
+
+
+def list_send_ready(settings: Settings, limit: int) -> list[dict[str, Any]]:
     conn = db.connect(settings)
     cur = conn.cursor(dictionary=True)
     try:
@@ -15,7 +18,7 @@ def list_send_blocked(settings: Settings, limit: int) -> list[dict[str, Any]]:
             FROM `{db.MAIL_TABLE}`
             WHERE route_type='API_ANALYSIS'
               AND status='COMPLETED'
-              AND send_status='SEND_BLOCKED'
+              AND send_status IN ('SEND_BLOCKED','SEND_PENDING')
               AND answer_text IS NOT NULL
               AND TRIM(answer_text)<>''
             ORDER BY id
@@ -40,7 +43,7 @@ def claim_send(settings: Settings, request_id: int) -> bool:
             WHERE id=%s
               AND route_type='API_ANALYSIS'
               AND status='COMPLETED'
-              AND send_status='SEND_BLOCKED'
+              AND send_status IN ('SEND_BLOCKED','SEND_PENDING')
               AND answer_text IS NOT NULL
               AND TRIM(answer_text)<>''
             """,
