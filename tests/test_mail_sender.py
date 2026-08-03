@@ -20,7 +20,7 @@ def _settings(**overrides):
         "mail_recipient_mode": "TEST",
         "mail_test_recipient": "tester@example.com",
         "mail_allow_original_recipient": False,
-        "mail_subject_prefix": "[IFA Curator 분석 결과]",
+        "mail_subject_prefix": "[IFA Curator]",
         "knox_mail_doc_secu_type": "PERSONAL",
         "knox_mail_content_type": "TEXT",
         "knox_mail_sender_email": "agent@example.com",
@@ -113,6 +113,7 @@ def test_payload_includes_resolved_recipient_and_sender_copy():
     row = _row()
     payload = build_payload(_settings(), row, "tester@example.com")
 
+    assert payload["subject"] == "[IFA Curator] A.N3 CA Middle Void Reference TEM"
     assert payload["recipients"] == [
         {"emailAddress": "tester@example.com", "recipientType": "TO"},
         {"emailAddress": "agent@example.com", "recipientType": "TO"},
