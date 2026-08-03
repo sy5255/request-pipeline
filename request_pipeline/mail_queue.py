@@ -8,7 +8,13 @@ from request_pipeline.config import Settings
 SEND_READY_STATUSES = ("SEND_BLOCKED", "SEND_PENDING")
 
 
-def list_send_ready(settings: Settings, limit: int) -> list[dict[str, Any]]:
+def list_send_ready(
+    settings: Settings,
+    limit: int,
+    *,
+    after_id: int = 0,
+) -> list[dict[str, Any]]:
+    """ID 커서 이후의 발송 대기 행을 한 배치 조회합니다."""
     conn = db.connect(settings)
     cur = conn.cursor(dictionary=True)
     try:
@@ -21,10 +27,11 @@ def list_send_ready(settings: Settings, limit: int) -> list[dict[str, Any]]:
               AND send_status IN ('SEND_BLOCKED','SEND_PENDING')
               AND answer_text IS NOT NULL
               AND TRIM(answer_text)<>''
+              AND id>%s
             ORDER BY id
             LIMIT %s
             """,
-            (limit,),
+            (after_id, limit),
         )
         return cur.fetchall() or []
     finally:
