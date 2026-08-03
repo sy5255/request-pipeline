@@ -67,7 +67,7 @@ class Settings:
     mail_send_batch_size: int = int(os.getenv("MAIL_SEND_BATCH_SIZE", "1"))
     mail_send_stale_minutes: int = int(os.getenv("MAIL_SEND_STALE_MINUTES", "15"))
     mail_subject_prefix: str = os.getenv(
-        "MAIL_SUBJECT_PREFIX", "[IFA Curator 분석 결과]"
+        "MAIL_SUBJECT_PREFIX", "[IFA Curator]"
     ).strip()
 
     knox_mail_api_url: str = os.getenv("KNOX_MAIL_API_URL", "").strip()
