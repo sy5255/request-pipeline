@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import call, patch
 
-from request_pipeline.run import process_pending_send
+from request_pipeline.run import process_api_queue, process_pending_send
 
 
 def _settings():
@@ -9,6 +9,7 @@ def _settings():
         mail_send_enabled=True,
         mail_send_batch_size=3,
         mail_recipient_mode="TEST",
+        analysis_interval_seconds=0,
     )
 
 
@@ -26,8 +27,9 @@ def test_process_pending_send_drains_all_batches():
         [{"id": 4}, {"id": 5}],
     ]
 
+    settings = _settings()
     with (
-        patch("request_pipeline.run.settings", _settings()),
+        patch("request_pipeline.run.settings", settings),
         patch("request_pipeline.run.mail_queue.recover_stale_sending", return_value=0),
         patch(
             "request_pipeline.run.mail_queue.list_send_ready",
@@ -50,8 +52,8 @@ def test_process_pending_send_drains_all_batches():
         "skipped": 0,
     }
     assert list_ready.call_args_list == [
-        call(_settings(), 3, after_id=0),
-        call(_settings(), 3, after_id=3),
+        call(settings, 3, after_id=0),
+        call(settings, 3, after_id=3),
     ]
     assert mark_sent.call_count == 5
 
@@ -90,3 +92,60 @@ def test_failed_row_is_not_retried_in_same_run():
         call(settings, 3, after_id=12),
     ]
     mark_failed.assert_called_once()
+
+
+def test_process_api_queue_repeats_batches_and_sends_each_result_immediately():
+    settings = _settings()
+    batches = [
+        [{"id": 1}, {"id": 2}, {"id": 3}],
+        [{"id": 4}, {"id": 5}],
+    ]
+    events: list[str] = []
+
+    def analyze(row):
+        events.append(f"analyze:{row['id']}")
+        return True
+
+    def send(request_id):
+        events.append(f"send:{request_id}")
+        return {
+            "ready": 1,
+            "sent": 1,
+            "failed": 0,
+            "unknown": 0,
+            "skipped": 0,
+        }
+
+    with (
+        patch("request_pipeline.run.settings", settings),
+        patch(
+            "request_pipeline.run.db.list_api_ready",
+            side_effect=batches,
+        ) as list_ready,
+        patch("request_pipeline.run._analyze_row", side_effect=analyze),
+        patch("request_pipeline.run._send_completed_request", side_effect=send),
+    ):
+        processed, succeeded, mail_counts = process_api_queue(3)
+
+    assert succeeded is True
+    assert processed == 5
+    assert mail_counts == {
+        "ready": 5,
+        "sent": 5,
+        "failed": 0,
+        "unknown": 0,
+        "skipped": 0,
+    }
+    assert list_ready.call_args_list == [call(settings, 3), call(settings, 3)]
+    assert events == [
+        "analyze:1",
+        "send:1",
+        "analyze:2",
+        "send:2",
+        "analyze:3",
+        "send:3",
+        "analyze:4",
+        "send:4",
+        "analyze:5",
+        "send:5",
+    ]
