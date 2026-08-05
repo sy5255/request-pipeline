@@ -152,6 +152,20 @@ SET request_template_json = JSON_SET(
 )
 WHERE profile_key = 'defect-analysis';
 
+UPDATE ae_llm_agent_api_profile
+SET instruction_template = CONCAT(
+    '이미 검색된 근거 문서만 사용하여 새 불량분석 의뢰와 관련된 과거 분석 이력을 설명하세요. ',
+    '검색 자체를 다시 수행하거나 검색어를 재작성하지 말고, 확보된 근거를 바탕으로 ',
+    '기술적 연관성, 참고할 점과 판단 시 주의사항을 명확하게 정리하세요.'
+)
+WHERE profile_key = 'defect-analysis'
+  AND (
+      instruction_template IS NULL
+      OR TRIM(instruction_template) = ''
+      OR instruction_template LIKE '%아래 텍스트는 새로 들어온 불량분석 의뢰제목%'
+      OR instruction_template LIKE '%{{raw_request_title}}%'
+  );
+
 INSERT IGNORE INTO ae_llm_agent_mail_rule(
     rule_key, rule_name, route_type, route_case, priority, enabled,
     rule_version, match_config_json, action_config_json, description

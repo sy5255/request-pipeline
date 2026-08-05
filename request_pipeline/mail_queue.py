@@ -5,7 +5,14 @@ from request_pipeline import db
 from request_pipeline.config import Settings
 
 
+# 자동 발송 대상은 명시적으로 이 두 상태만 허용합니다.
+# SEND_DROPPED와 SEND_UNKNOWN은 DBeaver 검수 또는 중복 발송 방지를 위해
+# 사람이 다시 SEND_BLOCKED/SEND_PENDING으로 바꾸기 전까지 제외됩니다.
 SEND_READY_STATUSES = ("SEND_BLOCKED", "SEND_PENDING")
+
+
+def _send_ready_placeholders() -> str:
+    return ",".join(["%s"] * len(SEND_READY_STATUSES))
 
 
 def list_send_ready(
@@ -14,24 +21,25 @@ def list_send_ready(
     *,
     after_id: int = 0,
 ) -> list[dict[str, Any]]:
-    """ID 커서 이후의 발송 대기 행을 한 배치 조회합니다."""
+    """ID 커서 이후의 자동 발송 가능 행을 한 배치 조회합니다."""
     conn = db.connect(settings)
     cur = conn.cursor(dictionary=True)
     try:
+        placeholders = _send_ready_placeholders()
         cur.execute(
             f"""
             SELECT *
             FROM `{db.MAIL_TABLE}`
             WHERE route_type='API_ANALYSIS'
               AND status='COMPLETED'
-              AND send_status IN ('SEND_BLOCKED','SEND_PENDING')
+              AND send_status IN ({placeholders})
               AND answer_text IS NOT NULL
               AND TRIM(answer_text)<>''
               AND id>%s
             ORDER BY id
             LIMIT %s
             """,
-            (after_id, limit),
+            (*SEND_READY_STATUSES, after_id, limit),
         )
         return cur.fetchall() or []
     finally:
@@ -43,6 +51,7 @@ def claim_send(settings: Settings, request_id: int) -> bool:
     conn = db.connect(settings)
     cur = conn.cursor()
     try:
+        placeholders = _send_ready_placeholders()
         cur.execute(
             f"""
             UPDATE `{db.MAIL_TABLE}`
@@ -50,11 +59,11 @@ def claim_send(settings: Settings, request_id: int) -> bool:
             WHERE id=%s
               AND route_type='API_ANALYSIS'
               AND status='COMPLETED'
-              AND send_status IN ('SEND_BLOCKED','SEND_PENDING')
+              AND send_status IN ({placeholders})
               AND answer_text IS NOT NULL
               AND TRIM(answer_text)<>''
             """,
-            (request_id,),
+            (request_id, *SEND_READY_STATUSES),
         )
         claimed = cur.rowcount == 1
         conn.commit()
@@ -110,6 +119,7 @@ def mark_send_failed(
     request_id: int,
     error: str,
 ) -> None:
+    """명확한 실패는 다음 실행에서 재시도하도록 SEND_BLOCKED로 복귀합니다."""
     conn = db.connect(settings)
     cur = conn.cursor()
     try:

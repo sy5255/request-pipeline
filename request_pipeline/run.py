@@ -20,6 +20,15 @@ logging.basicConfig(
 logger = logging.getLogger("request_pipeline")
 
 
+def _empty_mail_counts() -> dict[str, int]:
+    return {"ready": 0, "sent": 0, "failed": 0, "unknown": 0, "skipped": 0}
+
+
+def _merge_mail_counts(target: dict[str, int], source: dict[str, int]) -> None:
+    for key in target:
+        target[key] += int(source.get(key, 0))
+
+
 def _profile_key_from_row(row: dict) -> str:
     action = row.get("route_action_json") or {}
     if isinstance(action, str):
@@ -88,75 +97,52 @@ def _sleep_between_requests() -> None:
         time.sleep(settings.analysis_interval_seconds)
 
 
-def process_api_queue(batch_size: int) -> tuple[int, bool]:
-    if batch_size < 1:
-        raise RuntimeError("API queue batch size must be at least 1")
+def _send_row(row: dict) -> dict[str, int]:
+    counts = _empty_mail_counts()
+    request_id = int(row["id"])
+    counts["ready"] = 1
 
-    processed_count = 0
-    batch_number = 0
-    while True:
-        rows = db.list_api_ready(settings, batch_size)
-        if not rows:
-            if batch_number == 0:
-                logger.info(
-                    "api queue ready=0 batch_size=%s processed_total=0",
-                    batch_size,
-                )
-            break
+    if not mail_queue.claim_send(settings, request_id):
+        counts["skipped"] += 1
+        logger.info("mail claim skipped request_id=%s", request_id)
+        return counts
 
-        batch_number += 1
-        logger.info(
-            "api queue batch=%s ready=%s batch_size=%s processed_total=%s",
-            batch_number,
-            len(rows),
-            batch_size,
-            processed_count,
+    try:
+        result = send_analysis_mail(settings, row)
+        mail_queue.mark_sent(
+            settings,
+            request_id,
+            sent_mail_id=result.mail_id,
+            recipient=result.recipient,
+            response_json=result.response_json,
         )
+        counts["sent"] += 1
+        logger.info(
+            "mail sent request_id=%s recipient=%s mode=%s mail_id=%s",
+            request_id,
+            result.recipient,
+            settings.mail_recipient_mode,
+            result.mail_id or "<not-returned>",
+        )
+    except MailSendUnknownError as exc:
+        mail_queue.mark_send_unknown(settings, request_id, str(exc))
+        counts["unknown"] += 1
+        logger.exception("mail send result unknown request_id=%s", request_id)
+    except MailSendError as exc:
+        mail_queue.mark_send_failed(settings, request_id, str(exc))
+        counts["failed"] += 1
+        logger.exception("mail send failed request_id=%s", request_id)
+    except Exception as exc:
+        mail_queue.mark_send_failed(settings, request_id, str(exc))
+        counts["failed"] += 1
+        logger.exception("mail preparation failed request_id=%s", request_id)
 
-        for row in rows:
-            if processed_count > 0:
-                _sleep_between_requests()
-            if not _analyze_row(row):
-                logger.warning(
-                    "api queue processing stopped after failure request_id=%s "
-                    "processed_total=%s",
-                    row["id"],
-                    processed_count,
-                )
-                return processed_count, False
-            processed_count += 1
-
-        if len(rows) < batch_size:
-            break
-
-    return processed_count, True
-
-
-def collect_legacy_pop3_mail() -> int:
-    if not _legacy_pop3_collection_enabled():
-        return 0
-
-    collected = 0
-    for raw_mail in iter_messages(settings):
-        if db.uidl_exists(settings, raw_mail.uidl):
-            continue
-
-        parsed = parse_mail(raw_mail.raw_bytes, settings.target_subject_prefix)
-        if parsed.request_title is None:
-            logger.info("legacy collector skipped non-api mail uidl=%s", raw_mail.uidl)
-            continue
-
-        request_id = db.insert_received(settings, raw_mail.uidl, parsed)
-        collected += 1
-        logger.info("legacy API mail routed request_id=%s", request_id)
-
-    return collected
+    return counts
 
 
 def process_pending_send() -> dict[str, int]:
-    counts = {"ready": 0, "sent": 0, "failed": 0, "unknown": 0, "skipped": 0}
+    counts = _empty_mail_counts()
 
-    # 이 플래그 하나로 분석 기능은 유지하면서 자동 메일링만 즉시 중단합니다.
     if not settings.mail_send_enabled:
         logger.info(
             "automatic mail delivery disabled MAIL_SEND_ENABLED=false; "
@@ -188,7 +174,6 @@ def process_pending_send() -> dict[str, int]:
             break
 
         batch_number += 1
-        counts["ready"] += len(rows)
         logger.info(
             "mail queue batch=%s ready=%s batch_size=%s processed_total=%s "
             "recipient_mode=%s",
@@ -201,49 +186,104 @@ def process_pending_send() -> dict[str, int]:
 
         for row in rows:
             request_id = int(row["id"])
-            # 실패 후 SEND_BLOCKED로 돌아가더라도 같은 실행에서 재조회되지 않도록
-            # 조회 커서를 항상 전진시킵니다.
             after_id = max(after_id, request_id)
-
-            if not mail_queue.claim_send(settings, request_id):
-                counts["skipped"] += 1
-                logger.info("mail claim skipped request_id=%s", request_id)
-                continue
-
-            try:
-                result = send_analysis_mail(settings, row)
-                mail_queue.mark_sent(
-                    settings,
-                    request_id,
-                    sent_mail_id=result.mail_id,
-                    recipient=result.recipient,
-                    response_json=result.response_json,
-                )
-                counts["sent"] += 1
-                logger.info(
-                    "mail sent request_id=%s recipient=%s mode=%s mail_id=%s",
-                    request_id,
-                    result.recipient,
-                    settings.mail_recipient_mode,
-                    result.mail_id or "<not-returned>",
-                )
-            except MailSendUnknownError as exc:
-                mail_queue.mark_send_unknown(settings, request_id, str(exc))
-                counts["unknown"] += 1
-                logger.exception("mail send result unknown request_id=%s", request_id)
-            except MailSendError as exc:
-                mail_queue.mark_send_failed(settings, request_id, str(exc))
-                counts["failed"] += 1
-                logger.exception("mail send failed request_id=%s", request_id)
-            except Exception as exc:
-                mail_queue.mark_send_failed(settings, request_id, str(exc))
-                counts["failed"] += 1
-                logger.exception("mail preparation failed request_id=%s", request_id)
+            _merge_mail_counts(counts, _send_row(row))
 
         if len(rows) < batch_size:
             break
 
     return counts
+
+
+def _send_completed_request(request_id: int) -> dict[str, int]:
+    counts = _empty_mail_counts()
+    if not settings.mail_send_enabled:
+        return counts
+
+    rows = mail_queue.list_send_ready(
+        settings,
+        limit=1,
+        after_id=max(0, request_id - 1),
+    )
+    row = next((item for item in rows if int(item["id"]) == request_id), None)
+    if row is None:
+        counts["skipped"] += 1
+        logger.warning("completed request is not send-ready request_id=%s", request_id)
+        return counts
+
+    return _send_row(row)
+
+
+def process_api_queue(batch_size: int) -> tuple[int, bool, dict[str, int]]:
+    """LLM 요청을 batch_size건씩 조회하되 대기열 전체를 끝까지 처리합니다."""
+    if batch_size < 1:
+        raise RuntimeError("API queue batch size must be at least 1")
+
+    processed_count = 0
+    batch_number = 0
+    mail_counts = _empty_mail_counts()
+
+    while True:
+        rows = db.list_api_ready(settings, batch_size)
+        if not rows:
+            if batch_number == 0:
+                logger.info(
+                    "api queue ready=0 batch_size=%s processed_total=0",
+                    batch_size,
+                )
+            break
+
+        batch_number += 1
+        logger.info(
+            "api queue batch=%s ready=%s batch_size=%s processed_total=%s",
+            batch_number,
+            len(rows),
+            batch_size,
+            processed_count,
+        )
+
+        for row in rows:
+            if processed_count > 0:
+                _sleep_between_requests()
+
+            request_id = int(row["id"])
+            if not _analyze_row(row):
+                logger.warning(
+                    "api queue processing stopped after failure request_id=%s "
+                    "processed_total=%s",
+                    request_id,
+                    processed_count,
+                )
+                return processed_count, False, mail_counts
+
+            processed_count += 1
+            _merge_mail_counts(mail_counts, _send_completed_request(request_id))
+
+        if len(rows) < batch_size:
+            break
+
+    return processed_count, True, mail_counts
+
+
+def collect_legacy_pop3_mail() -> int:
+    if not _legacy_pop3_collection_enabled():
+        return 0
+
+    collected = 0
+    for raw_mail in iter_messages(settings):
+        if db.uidl_exists(settings, raw_mail.uidl):
+            continue
+
+        parsed = parse_mail(raw_mail.raw_bytes, settings.target_subject_prefix)
+        if parsed.request_title is None:
+            logger.info("legacy collector skipped non-api mail uidl=%s", raw_mail.uidl)
+            continue
+
+        request_id = db.insert_received(settings, raw_mail.uidl, parsed)
+        collected += 1
+        logger.info("legacy API mail routed request_id=%s", request_id)
+
+    return collected
 
 
 def _run_once() -> None:
@@ -255,24 +295,35 @@ def _run_once() -> None:
         )
 
     legacy_collected = collect_legacy_pop3_mail()
-    processed_count, succeeded = process_api_queue(settings.max_analysis_per_run)
-    mail_counts = process_pending_send()
+
+    # 이전 실행에서 남아 있던 SEND_PENDING/SEND_BLOCKED를 먼저 처리합니다.
+    backlog_mail_counts = process_pending_send()
+
+    # MAX_ANALYSIS_PER_RUN은 한 번에 조회하는 배치 크기이며,
+    # 배치를 반복해 분석 대기열 전체를 처리합니다.
+    processed_count, succeeded, realtime_mail_counts = process_api_queue(
+        settings.max_analysis_per_run
+    )
+
+    total_mail_counts = _empty_mail_counts()
+    _merge_mail_counts(total_mail_counts, backlog_mail_counts)
+    _merge_mail_counts(total_mail_counts, realtime_mail_counts)
 
     if not succeeded:
         logger.warning("pipeline stopped because an API request failed")
-        return
 
     logger.info(
         "pipeline finished legacy_collected=%s api_completed=%s "
         "queue_batch_size=%s mail_ready=%s mail_sent=%s mail_failed=%s "
-        "mail_unknown=%s",
+        "mail_unknown=%s mail_skipped=%s",
         legacy_collected,
         processed_count,
         settings.max_analysis_per_run,
-        mail_counts["ready"],
-        mail_counts["sent"],
-        mail_counts["failed"],
-        mail_counts["unknown"],
+        total_mail_counts["ready"],
+        total_mail_counts["sent"],
+        total_mail_counts["failed"],
+        total_mail_counts["unknown"],
+        total_mail_counts["skipped"],
     )
 
 
