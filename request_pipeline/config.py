@@ -79,7 +79,7 @@ class Settings:
         "KNOX_MAIL_DOC_SECU_TYPE", "PERSONAL"
     ).strip().upper()
     knox_mail_content_type: str = os.getenv(
-        "KNOX_MAIL_CONTENT_TYPE", "TEXT"
+        "KNOX_MAIL_CONTENT_TYPE", "HTML"
     ).strip().upper()
     knox_mail_connect_timeout: int = int(os.getenv("KNOX_MAIL_CONNECT_TIMEOUT", "10"))
     knox_mail_read_timeout: int = int(os.getenv("KNOX_MAIL_READ_TIMEOUT", "30"))
@@ -155,8 +155,8 @@ class Settings:
             raise RuntimeError("MAIL_SEND_STALE_MINUTES must be at least 1")
         if self.knox_mail_connect_timeout < 1 or self.knox_mail_read_timeout < 1:
             raise RuntimeError("Knox mail timeouts must be at least 1 second")
-        if self.knox_mail_content_type != "TEXT":
-            raise RuntimeError("KNOX_MAIL_CONTENT_TYPE currently supports TEXT only")
+        if self.knox_mail_content_type not in {"TEXT", "HTML"}:
+            raise RuntimeError("KNOX_MAIL_CONTENT_TYPE must be TEXT or HTML")
 
 
 settings = Settings()
