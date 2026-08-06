@@ -29,13 +29,13 @@ pip install -r requirements.txt
 python run_pipeline.py
 ```
 
-`run_pipeline.py`는 사내 스케줄러의 59분 실행 제한에 맞춰 다음과 같이 동작합니다.
+`run_pipeline.py`는 사내 스케줄러가 성공 종료 로그를 남길 수 있도록 다음과 같이 동작합니다.
 
 1. 시작 후 55분 동안 `request_pipeline.run.main()`을 반복 호출합니다.
 2. 각 처리 사이에는 기본 60초 동안 대기한 뒤 DB Queue를 다시 확인합니다.
-3. 처리 구간이 끝나면 남은 시간 동안 작업하지 않고 대기합니다.
-4. 시작 후 총 59분이 되면 정상 종료합니다.
-5. 마지막 처리 작업이 55분을 넘긴 경우에는 59분 제한을 지키기 위해 4분 대기 구간을 자동으로 줄입니다.
+3. 처리 구간이 끝나면 3분 동안 작업하지 않고 대기합니다.
+4. 시작 후 총 58분이 되면 `[scheduled pipeline finished]` 로그를 남기고 정상 종료합니다.
+5. 마지막 처리 작업이 55분을 넘긴 경우에는 58분 종료 시각을 맞추기 위해 3분 대기 구간을 자동으로 줄입니다.
 
 사내 스케줄러에는 다음과 같이 등록합니다.
 
@@ -54,11 +54,11 @@ python -m request_pipeline.run
 
 ## 스케줄러 시간 설정
 
-기본값은 55분 처리, 4분 대기, 60초 간격 재확인입니다.
+기본값은 55분 처리, 3분 대기, 60초 간격 재확인입니다.
 
 ```env
 PIPELINE_ACTIVE_WINDOW_SECONDS=3300
-PIPELINE_REST_WINDOW_SECONDS=240
+PIPELINE_REST_WINDOW_SECONDS=180
 PIPELINE_POLL_SECONDS=60
 ```
 
@@ -66,7 +66,7 @@ PIPELINE_POLL_SECONDS=60
 - `PIPELINE_REST_WINDOW_SECONDS`: 처리 구간이 끝난 뒤 프로세스가 작업 없이 대기하는 시간입니다.
 - `PIPELINE_POLL_SECONDS`: 한 번의 Queue 처리가 끝난 뒤 다음 처리까지의 대기 시간입니다.
 
-`PIPELINE_ACTIVE_WINDOW_SECONDS`와 `PIPELINE_REST_WINDOW_SECONDS`의 합은 사내 스케줄러의 최대 실행 시간보다 길게 설정하지 않는 것을 권장합니다.
+`PIPELINE_ACTIVE_WINDOW_SECONDS`와 `PIPELINE_REST_WINDOW_SECONDS`의 합은 사내 스케줄러의 최대 실행 시간보다 짧게 설정해야 정상 종료 로그를 안정적으로 남길 수 있습니다.
 
 ## 테이블명과 기존 데이터 이전
 
