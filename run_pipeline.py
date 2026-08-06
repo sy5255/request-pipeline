@@ -14,13 +14,13 @@ logger = logging.getLogger("request_pipeline.scheduler")
 stop_event = threading.Event()
 
 # Default scheduler cycle: process for 55 minutes, then remain idle until
-# 59 minutes have elapsed. The external scheduler can terminate the job
-# after 59 minutes and start a new job on the next hourly cycle.
+# 58 minutes have elapsed. This leaves about one minute for the external
+# scheduler to record successful completion before its 59-minute limit.
 ACTIVE_WINDOW_SECONDS = int(
     os.getenv("PIPELINE_ACTIVE_WINDOW_SECONDS", str(55 * 60))
 )
 REST_WINDOW_SECONDS = int(
-    os.getenv("PIPELINE_REST_WINDOW_SECONDS", str(4 * 60))
+    os.getenv("PIPELINE_REST_WINDOW_SECONDS", str(3 * 60))
 )
 POLL_SECONDS = int(os.getenv("PIPELINE_POLL_SECONDS", "60"))
 
@@ -91,7 +91,7 @@ def main() -> None:
     if not stop_event.is_set():
         # Calculate the idle period from the original start time. If the last
         # pipeline iteration exceeded the 55-minute active window, shorten the
-        # rest period so the whole process still finishes within 59 minutes.
+        # rest period so the whole process still finishes within 58 minutes.
         rest_seconds = max(0.0, shutdown_deadline - time.monotonic())
         logger.info(
             "pipeline active window finished iterations=%s rest_seconds=%s",
