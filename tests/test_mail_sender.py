@@ -7,8 +7,10 @@ import requests
 from request_pipeline.mail_sender import (
     MailSendUnknownError,
     build_contents,
+    build_html_contents,
     build_payload,
     build_recipients,
+    markdown_to_html,
     markdown_to_text,
     resolve_recipient,
     send_analysis_mail,
@@ -46,7 +48,8 @@ def _row():
         "answer_text": (
             "### 가장 가까운 이전 분석 레포트\n"
             "- **문서명:** 분석보고서 1\n"
-            "- [보고서 열기](https://edm.example/report/1)"
+            "- **연관 링크:** "
+            "[https://edm.example/report/1](https://edm.example/report/1)"
         ),
     }
 
@@ -81,13 +84,39 @@ def test_original_mode_prefers_reply_to_address():
     assert resolve_recipient(settings, _row()) == "reply@example.com"
 
 
-def test_markdown_links_are_converted_for_text_mail():
+def test_markdown_links_are_converted_without_duplicate_label_for_text_mail():
     result = markdown_to_text(
-        "### 보고서\n**문서명**\n[보고서 열기](https://edm.example/report/1)"
+        "### 보고서\n**연관 링크:** "
+        "[https://edm.example/report/1](https://edm.example/report/1)"
     )
     assert "###" not in result
     assert "**" not in result
-    assert "보고서 열기: https://edm.example/report/1" in result
+    assert "연관 링크: https://edm.example/report/1" in result
+    assert "https://edm.example/report/1: https://edm.example/report/1" not in result
+
+
+def test_markdown_links_are_clickable_in_html_mail():
+    result = markdown_to_html(
+        "- **연관 링크:** "
+        "[https://edm.example/report/1](https://edm.example/report/1)"
+    )
+
+    assert "<ul>" in result
+    assert "<strong>연관 링크:</strong>" in result
+    assert (
+        '<a href="https://edm.example/report/1">'
+        "https://edm.example/report/1</a>"
+    ) in result
+
+
+def test_html_mail_escapes_untrusted_text():
+    row = _row()
+    row["request_title"] = "<script>alert(1)</script>"
+
+    contents = build_html_contents(row)
+
+    assert "<script>" not in contents
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in contents
 
 
 def test_recipients_include_primary_and_knox_sender():
@@ -122,11 +151,25 @@ def test_payload_includes_resolved_recipient_and_sender_copy():
     assert "requester@example.com" not in str(payload["recipients"])
 
 
-def test_contents_include_answer_and_plain_edm_url():
+def test_html_payload_contains_clickable_related_link():
+    payload = build_payload(
+        _settings(knox_mail_content_type="HTML"),
+        _row(),
+        "tester@example.com",
+    )
+
+    assert payload["contentType"] == "HTML"
+    assert (
+        '<a href="https://edm.example/report/1">'
+        "https://edm.example/report/1</a>"
+    ) in payload["contents"]
+
+
+def test_contents_include_answer_and_plain_url():
     contents = build_contents(_row())
     assert "A.N3 CA Middle Void Reference TEM" in contents
     assert "분석보고서 1" in contents
-    assert "보고서 열기: https://edm.example/report/1" in contents
+    assert "연관 링크: https://edm.example/report/1" in contents
 
 
 def test_send_analysis_mail_calls_knox_api_with_sender_copy():
