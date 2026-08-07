@@ -10,6 +10,14 @@ def _bool(name: str, default: bool = False) -> bool:
     return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _csv_items(name: str) -> tuple[str, ...]:
+    return tuple(
+        item.strip()
+        for item in os.getenv(name, "").split(",")
+        if item.strip()
+    )
+
+
 @dataclass(frozen=True)
 class Settings:
     mysql_host: str = os.getenv("MYSQL_HOST", "127.0.0.1")
@@ -64,6 +72,8 @@ class Settings:
     mail_recipient_mode: str = os.getenv("MAIL_RECIPIENT_MODE", "TEST").strip().upper()
     mail_test_recipient: str = os.getenv("MAIL_TEST_RECIPIENT", "").strip()
     mail_allow_original_recipient: bool = _bool("MAIL_ALLOW_ORIGINAL_RECIPIENT", False)
+    # 정확한 이메일 주소만 허용합니다. 도메인 전체 허용은 지원하지 않습니다.
+    mail_allowed_recipients: tuple[str, ...] = _csv_items("MAIL_ALLOWED_RECIPIENTS")
     mail_send_batch_size: int = int(os.getenv("MAIL_SEND_BATCH_SIZE", "1"))
     mail_send_stale_minutes: int = int(os.getenv("MAIL_SEND_STALE_MINUTES", "15"))
     mail_subject_prefix: str = os.getenv(
@@ -124,6 +134,7 @@ class Settings:
                     "KNOX_MAIL_AUTH_TOKEN": self.knox_mail_auth_token,
                     "KNOX_MAIL_SYSTEM_ID": self.knox_mail_system_id,
                     "KNOX_MAIL_SENDER_EMAIL": self.knox_mail_sender_email,
+                    "MAIL_ALLOWED_RECIPIENTS": ",".join(self.mail_allowed_recipients),
                 }
             )
             if self.mail_recipient_mode == "TEST":
