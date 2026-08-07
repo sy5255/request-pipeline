@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -22,6 +23,10 @@ def _settings(**overrides):
         "mail_recipient_mode": "TEST",
         "mail_test_recipient": "tester@example.com",
         "mail_allow_original_recipient": False,
+        "mail_allowed_recipients": (
+            "tester@example.com",
+            "reply@example.com",
+        ),
         "mail_subject_prefix": "[IFA Curator]",
         "knox_mail_doc_secu_type": "PERSONAL",
         "knox_mail_content_type": "TEXT",
@@ -62,9 +67,32 @@ def _response(status_code=200, body='{"mailId":"mail-123"}'):
     return response
 
 
-def test_test_mode_forces_single_test_recipient():
+def test_test_mode_forces_allowlisted_test_recipient():
     recipient = resolve_recipient(_settings(), _row())
     assert recipient == "tester@example.com"
+
+
+def test_empty_allowlist_blocks_test_mode():
+    settings = _settings(mail_allowed_recipients=())
+
+    with pytest.raises(RuntimeError, match="allowlist is empty"):
+        resolve_recipient(settings, _row())
+
+
+def test_test_recipient_must_be_allowlisted():
+    settings = _settings(mail_allowed_recipients=("other@example.com",))
+
+    with pytest.raises(RuntimeError, match="not allowed"):
+        resolve_recipient(settings, _row())
+
+
+def test_allowlist_matching_is_case_insensitive():
+    settings = _settings(
+        mail_test_recipient="Tester@Example.com",
+        mail_allowed_recipients=("tester@example.com",),
+    )
+
+    assert resolve_recipient(settings, _row()) == "Tester@Example.com"
 
 
 def test_original_mode_requires_explicit_allow_flag():
@@ -76,12 +104,23 @@ def test_original_mode_requires_explicit_allow_flag():
         resolve_recipient(settings, _row())
 
 
-def test_original_mode_prefers_reply_to_address():
+def test_original_mode_prefers_allowlisted_reply_to_address():
     settings = _settings(
         mail_recipient_mode="ORIGINAL",
         mail_allow_original_recipient=True,
     )
     assert resolve_recipient(settings, _row()) == "reply@example.com"
+
+
+def test_original_mode_rejects_non_allowlisted_reply_to_address():
+    settings = _settings(
+        mail_recipient_mode="ORIGINAL",
+        mail_allow_original_recipient=True,
+        mail_allowed_recipients=("tester@example.com",),
+    )
+
+    with pytest.raises(RuntimeError, match="not allowed"):
+        resolve_recipient(settings, _row())
 
 
 def test_markdown_links_are_converted_without_duplicate_label_for_text_mail():
@@ -119,7 +158,7 @@ def test_html_mail_escapes_untrusted_text():
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in contents
 
 
-def test_recipients_include_primary_and_knox_sender():
+def test_recipients_include_allowlisted_primary_and_knox_sender():
     recipients = build_recipients(_settings(), "tester@example.com")
 
     assert recipients == [
@@ -129,7 +168,10 @@ def test_recipients_include_primary_and_knox_sender():
 
 
 def test_recipients_remove_duplicate_sender_address_case_insensitively():
-    settings = _settings(knox_mail_sender_email="Agent@Example.com")
+    settings = _settings(
+        knox_mail_sender_email="Agent@Example.com",
+        mail_allowed_recipients=("agent@example.com",),
+    )
 
     recipients = build_recipients(settings, "agent@example.com")
 
@@ -172,20 +214,42 @@ def test_contents_include_answer_and_plain_url():
     assert "연관 링크: https://edm.example/report/1" in contents
 
 
-def test_send_analysis_mail_calls_knox_api_with_sender_copy():
+def test_send_analysis_mail_uses_multipart_mail_field():
+    settings = _settings(knox_mail_content_type="HTML")
+
     with patch(
         "request_pipeline.mail_sender.requests.post",
         return_value=_response(),
     ) as post:
-        result = send_analysis_mail(_settings(), _row())
+        result = send_analysis_mail(settings, _row())
 
     assert result.mail_id == "mail-123"
     assert result.recipient == "tester@example.com"
-    assert post.call_args.kwargs["json"]["recipients"] == [
+    assert "json" not in post.call_args.kwargs
+    assert "Content-Type" not in post.call_args.kwargs["headers"]
+    assert post.call_args.kwargs["headers"]["System-ID"] == "KC123"
+
+    mail_part = post.call_args.kwargs["files"]["mail"]
+    assert mail_part[0] is None
+    assert mail_part[2] == "application/json"
+
+    payload = json.loads(mail_part[1])
+    assert payload["contentType"] == "HTML"
+    assert payload["recipients"] == [
         {"emailAddress": "tester@example.com", "recipientType": "TO"},
         {"emailAddress": "agent@example.com", "recipientType": "TO"},
     ]
-    assert post.call_args.kwargs["headers"]["System-ID"] == "KC123"
+    assert '<a href="https://edm.example/report/1">' in payload["contents"]
+
+
+def test_disallowed_recipient_does_not_call_knox_api():
+    settings = _settings(mail_allowed_recipients=("other@example.com",))
+
+    with patch("request_pipeline.mail_sender.requests.post") as post:
+        with pytest.raises(RuntimeError, match="not allowed"):
+            send_analysis_mail(settings, _row())
+
+    post.assert_not_called()
 
 
 def test_timeout_is_marked_as_unknown_result():
