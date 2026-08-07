@@ -39,11 +39,44 @@ def _valid_email(value: str) -> str:
     return email
 
 
+def _allowed_recipient_set(settings: Settings) -> set[str]:
+    raw_values = getattr(settings, "mail_allowed_recipients", ())
+    if isinstance(raw_values, str):
+        raw_values = raw_values.split(",")
+
+    allowed: set[str] = set()
+    for value in raw_values or ():
+        candidate = str(value or "").strip()
+        if not candidate:
+            continue
+        allowed.add(_valid_email(candidate).casefold())
+    return allowed
+
+
+def _ensure_recipient_allowed(settings: Settings, recipient: str) -> str:
+    email = _valid_email(recipient)
+    allowed = _allowed_recipient_set(settings)
+    if not allowed:
+        raise RuntimeError(
+            "Mail recipient allowlist is empty. "
+            "Set MAIL_ALLOWED_RECIPIENTS before enabling mail delivery."
+        )
+    if email.casefold() not in allowed:
+        raise RuntimeError(
+            f"Mail recipient is not allowed: {email}. "
+            "Add the exact address to MAIL_ALLOWED_RECIPIENTS."
+        )
+    return email
+
+
 def resolve_recipient(settings: Settings, row: dict[str, Any]) -> str:
-    """TEST 모드는 모든 메일을 단일 테스트 주소로 강제 우회합니다."""
+    """TEST와 ORIGINAL 모두 정확한 이메일 허용목록을 통과해야 합니다."""
     mode = settings.mail_recipient_mode
     if mode == "TEST":
-        return _valid_email(settings.mail_test_recipient)
+        return _ensure_recipient_allowed(
+            settings,
+            _valid_email(settings.mail_test_recipient),
+        )
 
     if mode != "ORIGINAL":
         raise RuntimeError(f"Unsupported MAIL_RECIPIENT_MODE: {mode}")
@@ -58,7 +91,10 @@ def resolve_recipient(settings: Settings, row: dict[str, Any]) -> str:
         or row.get("sender_email")
         or row.get("original_recipient_email")
     )
-    return _valid_email(str(recipient or ""))
+    return _ensure_recipient_allowed(
+        settings,
+        _valid_email(str(recipient or "")),
+    )
 
 
 def build_subject(settings: Settings, row: dict[str, Any]) -> str:
@@ -198,9 +234,9 @@ def build_recipients(
     settings: Settings,
     primary_recipient: str,
 ) -> list[dict[str, str]]:
-    """주 수신자와 Knox 발송 계정을 TO로 포함하고 중복 주소를 제거합니다."""
+    """허용된 주 수신자와 Knox 발송 계정을 TO로 포함하고 중복을 제거합니다."""
     addresses = [
-        _valid_email(primary_recipient),
+        _ensure_recipient_allowed(settings, primary_recipient),
         _valid_email(settings.knox_mail_sender_email),
     ]
 
@@ -272,16 +308,22 @@ def send_analysis_mail(
     url = f"{settings.knox_mail_api_url}?{query}"
     headers = {
         "accept": "*/*",
-        "Content-Type": "application/json",
         "Authorization": f"Bearer {settings.knox_mail_auth_token}",
         "System-ID": settings.knox_mail_system_id,
     }
+    mail_json = json.dumps(payload, ensure_ascii=False)
 
     try:
         response = requests.post(
             url,
             headers=headers,
-            json=payload,
+            files={
+                "mail": (
+                    None,
+                    mail_json,
+                    "application/json",
+                )
+            },
             timeout=(
                 settings.knox_mail_connect_timeout,
                 settings.knox_mail_read_timeout,
