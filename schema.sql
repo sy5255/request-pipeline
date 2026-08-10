@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS ae_llm_agent_mail_rule (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uq_ae_llm_agent_mail_rule_key (rule_key),
-    INDEX idx_ae_llm_agent_mail_rule_enabled_priority (enabled, priority),
+    INDEX idx_ae_llm_agent_api_profile_enabled_priority (enabled, priority),
     INDEX idx_ae_llm_agent_mail_rule_route (route_type, route_case)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -156,13 +156,17 @@ UPDATE ae_llm_agent_api_profile
 SET instruction_template = CONCAT(
     '이미 검색된 근거 문서만 사용하여 새 불량분석 의뢰와 관련된 과거 분석 이력을 분석하세요. ',
     '검색 자체를 다시 수행하거나 검색어를 재작성하지 말고 확보된 근거만 사용하세요. ',
-    '최종 분석 본문은 반드시 다음 순서와 제목으로 구성하세요: ',
-    '1) 이전 분석 레포트 요약, 2) 원리 (Mechanism), 3) 원인 (Cause), 4) 함의 (Implication). ',
-    '이전 분석 레포트 요약에서는 상위 레포트들의 핵심 분석 내용과 관찰 결과를 근거와 함께 정리하세요. ',
-    '원리 (Mechanism)에서는 검색 근거로 확인 가능한 물리적·공정적·재료적 발생 메커니즘을 설명하고 근거가 없는 내용은 단정하지 마세요. ',
-    '원인 (Cause)에서는 과거 사례에서 확인되거나 추정된 원인을 정리하고 직접 확인된 원인과 가능성 수준의 원인을 구분하세요. ',
-    '함의 (Implication)에서는 과거 사례가 이번 신규 의뢰 분석에 주는 의미를 설명하고, 필요한 경우 신규 의뢰와 과거 사례의 공통점·차이점·판단 시 주의사항을 이 섹션 안에 통합하세요. ',
-    '''공통점 및 차이점'', ''분석 시 주의사항'', ''분석 시 주의사항 및 함의''를 별도의 최상위 섹션으로 만들지 마세요.'
+    '최종 분석 본문은 반드시 다음 순서와 제목으로만 구성하세요: ',
+    '1) 가장 가까운 이전 분석 레포트, 2) 공통점 및 차이점, 3) 함의. ',
+    '''가장 가까운 이전 분석 레포트''에서는 검색 상위 문서들을 검색 순위와 동일한 순서로 각각 분리해 작성하세요. ',
+    '각 항목 제목은 ''1위 - <정확한 레포트명>'', ''2위 - <정확한 레포트명>'', ''3위 - <정확한 레포트명>'' 형식을 따르세요. ',
+    '각 순위 아래에는 해당 레포트에서 직접 확인되는 핵심 분석 내용만 간결하게 요약하고 서로 다른 레포트의 내용을 한 항목에 섞지 마세요. ',
+    '''공통점 및 차이점''에서는 신규 의뢰와 이전 레포트의 공통점과 차이점을 비교하고 가능한 경우 어느 순위 또는 어느 레포트와의 비교인지 명시하세요. ',
+    '유사도가 낮은 문서는 그 사실도 함께 밝히세요. ',
+    '''함의''에서는 이전 사례를 종합해 이번 신규 의뢰에서 참고할 판단 포인트와 추가 확인 사항을 설명하고, ',
+    '검색 근거가 있는 경우에 한해 가능한 원인 후보나 메커니즘을 언급하세요. ',
+    '검색 문서에서 직접 확인되지 않은 원인을 사실처럼 단정하지 마세요. ',
+    '''이전 분석 레포트 요약'', ''원리 (Mechanism)'', ''원인 (Cause)'', ''분석 시 주의사항'', ''분석 시 주의사항 및 함의''를 별도의 최상위 섹션으로 만들지 마세요.'
 )
 WHERE profile_key = 'defect-analysis'
   AND (
@@ -171,8 +175,7 @@ WHERE profile_key = 'defect-analysis'
       OR instruction_template LIKE '%아래 텍스트는 새로 들어온 불량분석 의뢰제목%'
       OR instruction_template LIKE '%{{raw_request_title}}%'
       OR instruction_template LIKE '%기술적 연관성, 참고할 점과 판단 시 주의사항%'
-      OR instruction_template LIKE '%공통점 및 차이점%'
-      OR instruction_template LIKE '%분석 시 주의사항 및 함의%'
+      OR instruction_template LIKE '%1) 이전 분석 레포트 요약, 2) 원리 (Mechanism)%'
   );
 
 INSERT IGNORE INTO ae_llm_agent_mail_rule(
