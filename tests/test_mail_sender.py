@@ -51,10 +51,15 @@ def _row():
         "sender_email": "requester@example.com",
         "reply_to_email": "reply@example.com",
         "answer_text": (
-            "### 가장 가까운 이전 분석 레포트\n"
+            "### 📌 가장 가까운 이전 분석 레포트 Top 3\n"
             "- **문서명:** 분석보고서 1\n"
             "- **연관 링크:** "
-            "[https://edm.example/report/1](https://edm.example/report/1)"
+            "[https://edm.example/report/1](https://edm.example/report/1)\n\n"
+            "### 🔍 공통점 및 차이점\n"
+            "- 공통점: 공통 내용\n"
+            "- 차이점: 차이 내용\n\n"
+            "### 💡 함의\n"
+            "추가 확인이 필요합니다."
         ),
     }
 
@@ -134,18 +139,40 @@ def test_markdown_links_are_converted_without_duplicate_label_for_text_mail():
     assert "https://edm.example/report/1: https://edm.example/report/1" not in result
 
 
-def test_markdown_links_are_clickable_in_html_mail():
+def test_html_renderer_looks_like_plain_text_but_keeps_clickable_links():
     result = markdown_to_html(
+        "### 📌 가장 가까운 이전 분석 레포트 Top 3\n"
         "- **연관 링크:** "
         "[https://edm.example/report/1](https://edm.example/report/1)"
     )
 
-    assert "<ul>" in result
-    assert "<strong>연관 링크:</strong>" in result
+    assert "<h3>" not in result
+    assert "<ul>" not in result
+    assert "<li>" not in result
+    assert "<p>" not in result
+    assert "📌 가장 가까운 이전 분석 레포트 Top 3" in result
+    assert "<strong>📌 가장 가까운 이전 분석 레포트 Top 3</strong>" in result
     assert (
         '<a href="https://edm.example/report/1">'
         "https://edm.example/report/1</a>"
     ) in result
+
+
+def test_html_renderer_preserves_multiple_comparison_lines_without_nested_lists():
+    result = markdown_to_html(
+        "### 🔍 공통점 및 차이점\n\n"
+        "- 공통점 1\n"
+        "- 공통점 2\n"
+        "- 차이점 1\n"
+        "- 차이점 2"
+    )
+
+    assert "공통점 1" in result
+    assert "공통점 2" in result
+    assert "차이점 1" in result
+    assert "차이점 2" in result
+    assert "<ul>" not in result
+    assert "<li>" not in result
 
 
 def test_html_mail_escapes_untrusted_text():
@@ -156,6 +183,19 @@ def test_html_mail_escapes_untrusted_text():
 
     assert "<script>" not in contents
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in contents
+
+
+def test_html_mail_uses_single_font_size_and_text_like_layout():
+    contents = build_html_contents(_row())
+
+    assert "font-size: 14px" in contents
+    assert "<h3>" not in contents
+    assert "<h4>" not in contents
+    assert "<ul>" not in contents
+    assert "<li>" not in contents
+    assert "📌 가장 가까운 이전 분석 레포트 Top 3" in contents
+    assert "🔍 공통점 및 차이점" in contents
+    assert "💡 함의" in contents
 
 
 def test_recipients_include_allowlisted_primary_and_knox_sender():
