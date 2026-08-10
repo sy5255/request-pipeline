@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS ae_llm_agent_mail_rule (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uq_ae_llm_agent_mail_rule_key (rule_key),
-    INDEX idx_ae_llm_agent_api_profile_enabled_priority (enabled, priority),
+    INDEX idx_ae_llm_agent_mail_rule_enabled_priority (enabled, priority),
     INDEX idx_ae_llm_agent_mail_rule_route (route_type, route_case)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
