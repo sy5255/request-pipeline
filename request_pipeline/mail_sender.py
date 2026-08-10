@@ -12,7 +12,8 @@ from request_pipeline.config import Settings
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
-_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+_URL_RE = re.compile(r"https?://[^\s<>\"]+")
+_SECTION_EMOJIS = ("📌", "🔍", "💡")
 
 
 class MailSendError(RuntimeError):
@@ -124,61 +125,42 @@ def markdown_to_text(value: str) -> str:
     return text.strip()
 
 
-def _markdown_inline_to_html(value: str) -> str:
+def _linkify_plain_line(value: str) -> str:
+    """일반 텍스트 한 줄을 escape한 뒤 URL만 클릭 가능한 anchor로 만듭니다."""
     parts: list[str] = []
     position = 0
 
-    for match in _MARKDOWN_LINK_RE.finditer(value):
+    for match in _URL_RE.finditer(value):
         parts.append(escape(value[position:match.start()]))
-        label = escape(match.group(1).strip())
-        url = escape(match.group(2).strip(), quote=True)
-        parts.append(f'<a href="{url}">{label}</a>')
+        url = match.group(0)
+        escaped_url = escape(url, quote=True)
+        parts.append(f'<a href="{escaped_url}">{escape(url)}</a>')
         position = match.end()
 
     parts.append(escape(value[position:]))
-    rendered = "".join(parts)
-    rendered = _BOLD_RE.sub(r"<strong>\1</strong>", rendered)
-    return rendered.replace("`", "")
+    return "".join(parts)
 
 
 def markdown_to_html(value: str) -> str:
-    """메일에 필요한 제한된 Markdown만 안전한 HTML로 변환합니다."""
-    lines = str(value or "").replace("\r\n", "\n").split("\n")
+    """Markdown을 텍스트처럼 평탄화하고 URL만 클릭 가능하게 렌더링합니다.
+
+    h1~h6, ul, li, p 같은 태그를 만들지 않아 메일 클라이언트별
+    폰트 크기와 들여쓰기 차이를 최소화합니다.
+    """
+    text = markdown_to_text(value)
     output: list[str] = []
-    list_open = False
 
-    def close_list() -> None:
-        nonlocal list_open
-        if list_open:
-            output.append("</ul>")
-            list_open = False
-
-    for raw_line in lines:
-        line = raw_line.strip()
+    for raw_line in text.split("\n"):
+        line = raw_line.rstrip()
         if not line:
-            close_list()
+            output.append("<br>")
             continue
 
-        heading = re.match(r"^(#{1,6})\s+(.+)$", line)
-        if heading:
-            close_list()
-            level = min(len(heading.group(1)), 4)
-            output.append(
-                f"<h{level}>{_markdown_inline_to_html(heading.group(2))}</h{level}>"
-            )
-            continue
+        rendered = _linkify_plain_line(line)
+        if line.lstrip().startswith(_SECTION_EMOJIS):
+            rendered = f"<strong>{rendered}</strong>"
+        output.append(f"{rendered}<br>")
 
-        if line.startswith("- "):
-            if not list_open:
-                output.append("<ul>")
-                list_open = True
-            output.append(f"<li>{_markdown_inline_to_html(line[2:])}</li>")
-            continue
-
-        close_list()
-        output.append(f"<p>{_markdown_inline_to_html(line)}</p>")
-
-    close_list()
     return "\n".join(output).strip()
 
 
@@ -213,14 +195,12 @@ def build_html_contents(row: dict[str, Any]) -> str:
     answer_html = markdown_to_html(_answer_text(row))
 
     return (
-        '<div style="font-family: Arial, sans-serif; line-height: 1.6;">'
-        "<p>안녕하세요.</p>"
-        "<p>요청하신 불량분석 의뢰 제목을 기준으로 "
-        "유사한 이전 분석 이력을 검색했습니다.</p>"
-        f"<p><strong>의뢰 제목</strong><br>{request_title}</p>"
-        f"{answer_html}"
-        "<p>본 결과는 현재 시스템에서 검색 가능한 문서를 "
-        "기준으로 생성되었습니다.</p>"
+        '<div style="font-family: Arial, sans-serif; font-size: 14px; line-height: 1.7;">'
+        "안녕하세요.<br><br>"
+        "요청하신 불량분석 의뢰 제목을 기준으로 유사한 이전 분석 이력을 검색했습니다.<br><br>"
+        f"<strong>의뢰 제목</strong><br>{request_title}<br><br>"
+        f"{answer_html}<br>"
+        "본 결과는 현재 시스템에서 검색 가능한 문서를 기준으로 생성되었습니다."
         "</div>"
     )
 
