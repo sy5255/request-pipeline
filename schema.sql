@@ -154,9 +154,18 @@ WHERE profile_key = 'defect-analysis';
 
 UPDATE ae_llm_agent_api_profile
 SET instruction_template = CONCAT(
-    '이미 검색된 근거 문서만 사용하여 새 불량분석 의뢰와 관련된 과거 분석 이력을 설명하세요. ',
-    '검색 자체를 다시 수행하거나 검색어를 재작성하지 말고, 확보된 근거를 바탕으로 ',
-    '기술적 연관성, 참고할 점과 판단 시 주의사항을 명확하게 정리하세요.'
+    '이미 검색된 근거 문서만 사용하여 새 불량분석 의뢰와 관련된 과거 분석 이력을 분석하세요. ',
+    '검색 자체를 다시 수행하거나 검색어를 재작성하지 말고 확보된 근거만 사용하세요. ',
+    '최종 답변은 다음 세 섹션을 이 순서로 구성하세요: ',
+    '''📌 가장 가까운 이전 분석 레포트 Top 3'', ''🔍 공통점 및 차이점'', ''💡 함의''. ',
+    '''📌 가장 가까운 이전 분석 레포트 Top 3''에서는 검색 상위 문서를 순위별로 구분하고 ',
+    '각 순위에 정확한 레포트명과 해당 레포트에서 확인되는 핵심 내용을 함께 요약하세요. ',
+    '서로 다른 레포트의 내용을 한 순위에 섞지 마세요. ',
+    '''🔍 공통점 및 차이점''에서는 신규 의뢰와 과거 사례를 충분히 비교하세요. ',
+    '공통점과 차이점을 한 줄로 제한하지 말고 필요한 만큼 항목을 작성하되 과도한 중첩 목록은 사용하지 마세요. ',
+    '''💡 함의''에서는 이전 사례를 종합해 이번 신규 의뢰에서 참고할 판단 포인트와 추가 확인 사항을 설명하고, ',
+    '검색 근거가 있는 경우에 한해 가능한 원인 후보나 메커니즘을 언급하세요. ',
+    '검색 문서에서 직접 확인되지 않은 원인을 사실처럼 단정하지 마세요.'
 )
 WHERE profile_key = 'defect-analysis'
   AND (
@@ -164,6 +173,9 @@ WHERE profile_key = 'defect-analysis'
       OR TRIM(instruction_template) = ''
       OR instruction_template LIKE '%아래 텍스트는 새로 들어온 불량분석 의뢰제목%'
       OR instruction_template LIKE '%{{raw_request_title}}%'
+      OR instruction_template LIKE '%기술적 연관성, 참고할 점과 판단 시 주의사항%'
+      OR instruction_template LIKE '%1) 이전 분석 레포트 요약, 2) 원리 (Mechanism)%'
+      OR instruction_template LIKE '%1) 가장 가까운 이전 분석 레포트, 2) 공통점 및 차이점, 3) 함의.%'
   );
 
 INSERT IGNORE INTO ae_llm_agent_mail_rule(

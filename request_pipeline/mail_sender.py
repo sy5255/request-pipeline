@@ -1,6 +1,7 @@
 import json
 import re
 from dataclasses import dataclass
+from html import escape
 from typing import Any
 from urllib.parse import urlencode
 
@@ -11,6 +12,8 @@ from request_pipeline.config import Settings
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
+_URL_RE = re.compile(r"https?://[^\s<>\"]+")
+_SECTION_EMOJIS = ("📌", "🔍", "💡")
 
 
 class MailSendError(RuntimeError):
@@ -37,11 +40,44 @@ def _valid_email(value: str) -> str:
     return email
 
 
+def _allowed_recipient_set(settings: Settings) -> set[str]:
+    raw_values = getattr(settings, "mail_allowed_recipients", ())
+    if isinstance(raw_values, str):
+        raw_values = raw_values.split(",")
+
+    allowed: set[str] = set()
+    for value in raw_values or ():
+        candidate = str(value or "").strip()
+        if not candidate:
+            continue
+        allowed.add(_valid_email(candidate).casefold())
+    return allowed
+
+
+def _ensure_recipient_allowed(settings: Settings, recipient: str) -> str:
+    email = _valid_email(recipient)
+    allowed = _allowed_recipient_set(settings)
+    if not allowed:
+        raise RuntimeError(
+            "Mail recipient allowlist is empty. "
+            "Set MAIL_ALLOWED_RECIPIENTS before enabling mail delivery."
+        )
+    if email.casefold() not in allowed:
+        raise RuntimeError(
+            f"Mail recipient is not allowed: {email}. "
+            "Add the exact address to MAIL_ALLOWED_RECIPIENTS."
+        )
+    return email
+
+
 def resolve_recipient(settings: Settings, row: dict[str, Any]) -> str:
-    """TEST 모드는 모든 메일을 단일 테스트 주소로 강제 우회합니다."""
+    """TEST와 ORIGINAL 모두 정확한 이메일 허용목록을 통과해야 합니다."""
     mode = settings.mail_recipient_mode
     if mode == "TEST":
-        return _valid_email(settings.mail_test_recipient)
+        return _ensure_recipient_allowed(
+            settings,
+            _valid_email(settings.mail_test_recipient),
+        )
 
     if mode != "ORIGINAL":
         raise RuntimeError(f"Unsupported MAIL_RECIPIENT_MODE: {mode}")
@@ -56,7 +92,10 @@ def resolve_recipient(settings: Settings, row: dict[str, Any]) -> str:
         or row.get("sender_email")
         or row.get("original_recipient_email")
     )
-    return _valid_email(str(recipient or ""))
+    return _ensure_recipient_allowed(
+        settings,
+        _valid_email(str(recipient or "")),
+    )
 
 
 def build_subject(settings: Settings, row: dict[str, Any]) -> str:
@@ -69,22 +108,78 @@ def build_subject(settings: Settings, row: dict[str, Any]) -> str:
     return subject[:200]
 
 
+def _markdown_link_to_text(match: re.Match[str]) -> str:
+    label = match.group(1).strip()
+    url = match.group(2).strip()
+    if label == url:
+        return url
+    return f"{label}: {url}"
+
+
 def markdown_to_text(value: str) -> str:
     text = str(value or "").replace("\r\n", "\n")
-    text = _MARKDOWN_LINK_RE.sub(lambda m: f"{m.group(1)}: {m.group(2)}", text)
+    text = _MARKDOWN_LINK_RE.sub(_markdown_link_to_text, text)
     text = re.sub(r"(?m)^#{1,6}\s*", "", text)
     text = text.replace("**", "").replace("__", "").replace("`", "")
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
-def build_contents(row: dict[str, Any]) -> str:
-    request_title = str(
+def _linkify_plain_line(value: str) -> str:
+    """일반 텍스트 한 줄을 escape한 뒤 URL만 클릭 가능한 anchor로 만듭니다."""
+    parts: list[str] = []
+    position = 0
+
+    for match in _URL_RE.finditer(value):
+        parts.append(escape(value[position:match.start()]))
+        url = match.group(0)
+        escaped_url = escape(url, quote=True)
+        parts.append(f'<a href="{escaped_url}">{escape(url)}</a>')
+        position = match.end()
+
+    parts.append(escape(value[position:]))
+    return "".join(parts)
+
+
+def markdown_to_html(value: str) -> str:
+    """Markdown을 텍스트처럼 평탄화하고 URL만 클릭 가능하게 렌더링합니다.
+
+    h1~h6, ul, li, p 같은 태그를 만들지 않아 메일 클라이언트별
+    폰트 크기와 들여쓰기 차이를 최소화합니다.
+    """
+    text = markdown_to_text(value)
+    output: list[str] = []
+
+    for raw_line in text.split("\n"):
+        line = raw_line.rstrip()
+        if not line:
+            output.append("<br>")
+            continue
+
+        rendered = _linkify_plain_line(line)
+        if line.lstrip().startswith(_SECTION_EMOJIS):
+            rendered = f"<strong>{rendered}</strong>"
+        output.append(f"{rendered}<br>")
+
+    return "\n".join(output).strip()
+
+
+def _request_title(row: dict[str, Any]) -> str:
+    return str(
         row.get("request_title") or row.get("original_subject") or ""
     ).strip()
-    answer = markdown_to_text(str(row.get("answer_text") or ""))
+
+
+def _answer_text(row: dict[str, Any]) -> str:
+    answer = str(row.get("answer_text") or "").strip()
     if not answer:
         raise RuntimeError(f"answer_text is empty for request_id={row.get('id')}")
+    return answer
+
+
+def build_text_contents(row: dict[str, Any]) -> str:
+    request_title = _request_title(row)
+    answer = markdown_to_text(_answer_text(row))
 
     return (
         "안녕하세요.\n\n"
@@ -95,13 +190,33 @@ def build_contents(row: dict[str, Any]) -> str:
     ).strip()
 
 
+def build_html_contents(row: dict[str, Any]) -> str:
+    request_title = escape(_request_title(row))
+    answer_html = markdown_to_html(_answer_text(row))
+
+    return (
+        '<div style="font-family: Arial, sans-serif; font-size: 14px; line-height: 1.7;">'
+        "안녕하세요.<br><br>"
+        "요청하신 불량분석 의뢰 제목을 기준으로 유사한 이전 분석 이력을 검색했습니다.<br><br>"
+        f"<strong>의뢰 제목</strong><br>{request_title}<br><br>"
+        f"{answer_html}<br>"
+        "본 결과는 현재 시스템에서 검색 가능한 문서를 기준으로 생성되었습니다."
+        "</div>"
+    )
+
+
+def build_contents(row: dict[str, Any]) -> str:
+    """기존 호출부와 테스트를 위한 TEXT 본문 호환 함수입니다."""
+    return build_text_contents(row)
+
+
 def build_recipients(
     settings: Settings,
     primary_recipient: str,
 ) -> list[dict[str, str]]:
-    """주 수신자와 Knox 발송 계정을 TO로 포함하고 중복 주소를 제거합니다."""
+    """허용된 주 수신자와 Knox 발송 계정을 TO로 포함하고 중복을 제거합니다."""
     addresses = [
-        _valid_email(primary_recipient),
+        _ensure_recipient_allowed(settings, primary_recipient),
         _valid_email(settings.knox_mail_sender_email),
     ]
 
@@ -128,11 +243,18 @@ def build_payload(
     recipient: str,
 ) -> dict[str, Any]:
     sender_email = _valid_email(settings.knox_mail_sender_email)
+    content_type = settings.knox_mail_content_type
+    contents = (
+        build_html_contents(row)
+        if content_type == "HTML"
+        else build_text_contents(row)
+    )
+
     return {
         "subject": build_subject(settings, row),
         "docSecuType": settings.knox_mail_doc_secu_type,
-        "contents": build_contents(row),
-        "contentType": settings.knox_mail_content_type,
+        "contents": contents,
+        "contentType": content_type,
         "sender": {"emailAddress": sender_email},
         "recipients": build_recipients(settings, recipient),
     }
@@ -166,16 +288,22 @@ def send_analysis_mail(
     url = f"{settings.knox_mail_api_url}?{query}"
     headers = {
         "accept": "*/*",
-        "Content-Type": "application/json",
         "Authorization": f"Bearer {settings.knox_mail_auth_token}",
         "System-ID": settings.knox_mail_system_id,
     }
+    mail_json = json.dumps(payload, ensure_ascii=False)
 
     try:
         response = requests.post(
             url,
             headers=headers,
-            json=payload,
+            files={
+                "mail": (
+                    None,
+                    mail_json,
+                    "application/json",
+                )
+            },
             timeout=(
                 settings.knox_mail_connect_timeout,
                 settings.knox_mail_read_timeout,
