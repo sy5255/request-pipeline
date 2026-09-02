@@ -6,6 +6,7 @@ from typing import Any, Iterator
 
 import mysql.connector
 
+from request_pipeline import errors
 from request_pipeline.config import Settings
 from request_pipeline.mail_parser import ParsedMail
 
@@ -150,6 +151,9 @@ def _ensure_mail_route_columns(settings: Settings) -> None:
         "sharedworkspace_path": "VARCHAR(2000) NULL AFTER `classified_at`",
         "attachment_count": "INT NULL AFTER `sharedworkspace_path`",
         "saved_at": "DATETIME NULL AFTER `attachment_count`",
+        "last_error_kind": "VARCHAR(20) NULL AFTER `last_error`",
+        "next_attempt_at": "DATETIME NULL AFTER `last_error_kind`",
+        "recovery_round": "INT NOT NULL DEFAULT 0 AFTER `next_attempt_at`",
     }
     conn = connect(settings)
     cur = conn.cursor()
@@ -429,9 +433,14 @@ def claim_api_request(settings: Settings, request_id: int) -> bool:
     try:
         cur.execute(
             f"""
-            UPDATE `{MAIL_TABLE}` SET status='PROCESSING', last_error=NULL
+            UPDATE `{MAIL_TABLE}`
+            SET status='PROCESSING',
+                last_error=NULL,
+                last_error_kind=NULL,
+                next_attempt_at=NULL
             WHERE id=%s AND route_type='API_ANALYSIS'
               AND status IN ('ROUTED','RETRY')
+              AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
             """,
             (request_id,),
         )
@@ -456,10 +465,27 @@ def mark_completed(settings: Settings, request_id: int, result: dict[str, Any]) 
         chat_search_log_id=trace.get("search_log_id"),
         send_status="SEND_BLOCKED" if not settings.mail_send_enabled else "SEND_PENDING",
         last_error=None,
+        last_error_kind=None,
+        next_attempt_at=None,
     )
 
 
-def mark_retry(settings: Settings, request_id: int, error: str) -> None:
+def mark_retry(
+    settings: Settings,
+    request_id: int,
+    error: str,
+    error_kind: str = errors.PERMANENT,
+) -> None:
+    """실패를 기록합니다.
+
+    일시적 오류는 곧바로 다시 호출해도 같은 실패가 반복되므로
+    TRANSIENT_RETRY_DELAY_SECONDS만큼 next_attempt_at을 미룹니다.
+    영구 오류는 기존과 동일하게 다음 실행에서 바로 재시도합니다.
+    """
+    is_transient = error_kind == errors.TRANSIENT
+    delay_seconds = (
+        settings.transient_retry_delay_seconds if is_transient else 0
+    )
     conn = connect(settings)
     cur = conn.cursor()
     try:
@@ -467,12 +493,64 @@ def mark_retry(settings: Settings, request_id: int, error: str) -> None:
             f"""
             UPDATE `{MAIL_TABLE}`
             SET status=IF(retry_count+1 >= %s,'FAILED','RETRY'),
-                retry_count=retry_count+1, last_error=%s
+                retry_count=retry_count+1,
+                last_error=%s,
+                last_error_kind=%s,
+                next_attempt_at=IF(
+                    %s > 0, DATE_ADD(NOW(), INTERVAL %s SECOND), NULL
+                )
             WHERE id=%s AND route_type='API_ANALYSIS'
             """,
-            (settings.max_retry_count, error[:4000], request_id),
+            (
+                settings.max_retry_count,
+                error[:4000],
+                error_kind,
+                delay_seconds,
+                delay_seconds,
+                request_id,
+            ),
         )
         conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+
+
+def recover_failed_transient_requests(settings: Settings) -> int:
+    """일시적 오류로 FAILED가 된 요청을 다시 분석 대기열로 되돌립니다.
+
+    분류가 기록된 행(last_error_kind='TRANSIENT')만 대상입니다. 개편 이전에
+    쌓인 FAILED 행은 분류 정보가 없으므로 되살리지 않습니다.
+
+    재시도 예산을 초기화하되 되살린 횟수는 recovery_round에 누적해,
+    끝내 복구되지 않는 요청이 무한히 재시도되지 않게 합니다.
+    """
+    conn = connect(settings)
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            f"""
+            UPDATE `{MAIL_TABLE}`
+            SET status='RETRY',
+                retry_count=0,
+                recovery_round=recovery_round+1,
+                next_attempt_at=NULL
+            WHERE route_type='API_ANALYSIS'
+              AND status='FAILED'
+              AND last_error_kind=%s
+              AND updated_at < DATE_SUB(NOW(), INTERVAL %s MINUTE)
+              AND (%s = 0 OR recovery_round < %s)
+            """,
+            (
+                errors.TRANSIENT,
+                settings.failed_retry_cooldown_minutes,
+                settings.max_failed_recovery_rounds,
+                settings.max_failed_recovery_rounds,
+            ),
+        )
+        count = cur.rowcount
+        conn.commit()
+        return count
     finally:
         cur.close()
         conn.close()
@@ -511,6 +589,7 @@ def list_api_ready(settings: Settings, limit: int) -> list[dict[str, Any]]:
             WHERE route_type='API_ANALYSIS'
               AND status IN ('ROUTED','RETRY')
               AND retry_count < %s
+              AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
             ORDER BY CASE WHEN status='RETRY' THEN 0 ELSE 1 END, id
             LIMIT %s
             """,

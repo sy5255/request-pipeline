@@ -94,9 +94,10 @@ RENAME TABLE request_mail TO ae_llm_agent_mail;
 2. DB 저장 직후 프로세스가 종료되어 `RECEIVED`로 남아도 다음 실행에서 `RETRY`로 복구합니다.
 3. 분석 도중 종료되어 오래된 `PROCESSING`으로 남아도 다음 실행에서 `RETRY`로 복구합니다.
 4. 분석 API가 성공한 뒤 DB 반영 전에 종료되더라도 같은 `request_id`로 재호출합니다. `report-search` 내부 API의 request_id 멱등성에 의해 중복 결과 생성을 방지합니다.
-5. 비대상 메일은 `IGNORED`로 확정하여 복구 대상에서 제외합니다.
-6. MySQL advisory lock을 획득한 실행만 테이블 이전, 스키마 확인 및 메일 처리를 수행합니다.
-7. MySQL 연결이 끊기면 advisory lock은 자동 해제되므로 강제 종료 이후 다음 스케줄이 다시 실행될 수 있습니다.
+5. 일시적 장애(분석 서버 재기동, 5xx, 게이트웨이 차단)로 `FAILED`가 된 요청은 다음 실행에서 다시 `RETRY`로 되돌립니다.
+6. 비대상 메일은 `IGNORED`로 확정하여 복구 대상에서 제외합니다.
+7. MySQL advisory lock을 획득한 실행만 테이블 이전, 스키마 확인 및 메일 처리를 수행합니다.
+8. MySQL 연결이 끊기면 advisory lock은 자동 해제되므로 강제 종료 이후 다음 스케줄이 다시 실행될 수 있습니다.
 
 다만 POP3 서버에서 메일이 다음 수집 전에 삭제되지 않고 보관되어야 합니다. 다른 POP3 클라이언트가 서버 메일을 삭제하는 설정은 사용하지 않아야 합니다.
 
@@ -106,13 +107,37 @@ RENAME TABLE request_mail TO ae_llm_agent_mail;
 STALE_PROCESSING_MINUTES=15
 PIPELINE_LOCK_NAME=request_pipeline_scheduler
 PIPELINE_LOCK_WAIT_SECONDS=0
+TRANSIENT_RETRY_DELAY_SECONDS=300
+FAILED_RETRY_COOLDOWN_MINUTES=10
+MAX_FAILED_RECOVERY_ROUNDS=5
 ```
 
 - `STALE_PROCESSING_MINUTES`: 이 시간보다 오래된 `PROCESSING` 요청을 중단된 실행으로 판단합니다.
 - `PIPELINE_LOCK_NAME`: 같은 DB를 사용하는 모든 스케줄러 인스턴스가 공유할 lock 이름입니다.
 - `PIPELINE_LOCK_WAIT_SECONDS=0`: 이미 다른 실행이 동작 중이면 기다리지 않고 현재 실행을 정상 종료합니다.
+- `TRANSIENT_RETRY_DELAY_SECONDS`: 일시적 오류 직후 같은 요청을 다시 호출하기까지 대기할 시간입니다.
+- `FAILED_RETRY_COOLDOWN_MINUTES`: 일시적 오류로 `FAILED`가 된 요청을 대기열로 되돌리기 전 대기 시간입니다.
+- `MAX_FAILED_RECOVERY_ROUNDS`: 같은 요청을 `FAILED`에서 되살릴 최대 횟수입니다. `0`이면 제한하지 않습니다.
 
 중복 실행 방지는 애플리케이션 내부의 MySQL advisory lock이 담당합니다. 이전 스케줄 작업이 예상보다 오래 실행되어 다음 작업과 잠시 겹치더라도 같은 시점에 두 프로세스가 Queue를 처리하지 않습니다.
+
+## 일시적 오류 재시도
+
+분석 API 호출 실패는 실패한 시점의 예외로 두 종류로 분류하고 `ae_llm_agent_mail.last_error_kind`에 기록합니다.
+
+| 분류 | 대상 | 처리 |
+| --- | --- | --- |
+| `TRANSIENT` | 연결 거부/리셋, connect/read 타임아웃, 응답 중단, HTTP 408·425·429·500·502·503·504, 사내 게이트웨이 차단 | `TRANSIENT_RETRY_DELAY_SECONDS` 뒤에 재시도하고, `FAILED`가 되어도 다시 대기열로 복귀 |
+| `PERMANENT` | SSL 인증서 오류, 그 외 4xx, JSON 파싱 실패, 응답 status 불일치, 프로필/크리덴셜 누락 | 기존과 동일하게 즉시 재시도하고 `MAX_RETRY_COUNT` 소진 시 `FAILED`로 확정 |
+
+동작 방식은 다음과 같습니다.
+
+1. 일시적 오류는 `next_attempt_at`을 미래로 설정해 같은 장애 구간에서 재시도 예산을 낭비하지 않습니다.
+2. 그럼에도 `MAX_RETRY_COUNT`를 소진하면 `FAILED`가 되지만, `last_error_kind='TRANSIENT'`로 남습니다.
+3. 다음 실행에서 `FAILED_RETRY_COOLDOWN_MINUTES`가 지난 `TRANSIENT` 실패를 `RETRY`로 되돌리고 `retry_count`를 0으로 초기화합니다.
+4. 되살린 횟수는 `recovery_round`에 누적되며 `MAX_FAILED_RECOVERY_ROUNDS`를 넘으면 더 이상 되살리지 않습니다.
+
+`last_error_kind`가 비어 있는 행은 분류 정보가 없으므로 자동 복구 대상이 아닙니다. 이 개편 이전에 쌓인 `FAILED` 행을 다시 처리하려면 DBeaver 등에서 직접 `status='RETRY'`, `retry_count=0`으로 바꿔야 합니다.
 
 ## 분석 API 호출 보호 설정
 
@@ -129,6 +154,7 @@ ANALYSIS_INTERVAL_SECONDS=3
 2. 분석 API 호출 사이에 설정한 시간만큼 대기합니다.
 3. 한 건이라도 실패하면 현재 Queue 처리 회차의 추가 API 호출을 중단합니다.
 4. `run_pipeline.py`가 다음 polling 시점에 다시 Queue 처리를 시도합니다.
+5. 일시적 오류로 실패한 건은 `TRANSIENT_RETRY_DELAY_SECONDS`가 지난 뒤에 다시 조회됩니다.
 
 ## HTTPS 인증서 설정
 

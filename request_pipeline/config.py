@@ -47,6 +47,20 @@ class Settings:
     analysis_interval_seconds: float = float(os.getenv("ANALYSIS_INTERVAL_SECONDS", "3"))
     stale_processing_minutes: int = int(os.getenv("STALE_PROCESSING_MINUTES", "15"))
 
+    # 일시적 오류(서버 재기동, 5xx, 게이트웨이 차단) 전용 재시도 정책입니다.
+    # 실패 직후 곧바로 다시 호출하지 않고 이 시간만큼 대기한 뒤 재시도합니다.
+    transient_retry_delay_seconds: int = int(
+        os.getenv("TRANSIENT_RETRY_DELAY_SECONDS", "300")
+    )
+    # 일시적 오류로 FAILED가 된 요청을 다시 대기열로 되돌리기 전 대기 시간입니다.
+    failed_retry_cooldown_minutes: int = int(
+        os.getenv("FAILED_RETRY_COOLDOWN_MINUTES", "10")
+    )
+    # 같은 요청을 FAILED에서 되살릴 최대 횟수입니다. 0이면 제한하지 않습니다.
+    max_failed_recovery_rounds: int = int(
+        os.getenv("MAX_FAILED_RECOVERY_ROUNDS", "5")
+    )
+
     pipeline_lock_name: str = os.getenv(
         "PIPELINE_LOCK_NAME", "request_pipeline_scheduler"
     ).strip()
@@ -149,6 +163,12 @@ class Settings:
             raise RuntimeError("ANALYSIS_INTERVAL_SECONDS must be 0 or greater")
         if self.stale_processing_minutes < 1:
             raise RuntimeError("STALE_PROCESSING_MINUTES must be at least 1")
+        if self.transient_retry_delay_seconds < 0:
+            raise RuntimeError("TRANSIENT_RETRY_DELAY_SECONDS must be 0 or greater")
+        if self.failed_retry_cooldown_minutes < 1:
+            raise RuntimeError("FAILED_RETRY_COOLDOWN_MINUTES must be at least 1")
+        if self.max_failed_recovery_rounds < 0:
+            raise RuntimeError("MAX_FAILED_RECOVERY_ROUNDS must be 0 or greater")
         if not self.pipeline_lock_name or len(self.pipeline_lock_name) > 64:
             raise RuntimeError("PIPELINE_LOCK_NAME must contain 1 to 64 characters")
         if self.pipeline_lock_wait_seconds < 0:

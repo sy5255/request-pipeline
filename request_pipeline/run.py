@@ -2,7 +2,7 @@ import json
 import logging
 import time
 
-from request_pipeline import db, mail_queue
+from request_pipeline import db, errors, mail_queue
 from request_pipeline.config import settings
 from request_pipeline.mail_client import iter_messages
 from request_pipeline.mail_parser import parse_mail
@@ -87,8 +87,16 @@ def _analyze_row(row: dict) -> bool:
         )
         return True
     except Exception as exc:
-        db.mark_retry(settings, request_id, str(exc))
-        logger.exception("analysis failed request_id=%s", request_id)
+        error_kind = errors.classify_error(exc)
+        db.mark_retry(settings, request_id, str(exc), error_kind)
+        logger.exception(
+            "analysis failed request_id=%s error_kind=%s retry_delay_seconds=%s",
+            request_id,
+            error_kind,
+            settings.transient_retry_delay_seconds
+            if error_kind == errors.TRANSIENT
+            else 0,
+        )
         return False
 
 
@@ -292,6 +300,18 @@ def _run_once() -> None:
         logger.warning(
             "recovered incomplete API requests processing=%s",
             recovery["processing"],
+        )
+
+    # 개발/운영 서버 재기동처럼 일시적인 장애로 FAILED가 된 요청은
+    # 서버가 복구된 뒤 다음 실행에서 다시 분석 대기열로 돌려보냅니다.
+    revived = db.recover_failed_transient_requests(settings)
+    if revived:
+        logger.warning(
+            "requeued transient FAILED API requests count=%s "
+            "cooldown_minutes=%s max_rounds=%s",
+            revived,
+            settings.failed_retry_cooldown_minutes,
+            settings.max_failed_recovery_rounds,
         )
 
     legacy_collected = collect_legacy_pop3_mail()

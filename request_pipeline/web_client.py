@@ -7,10 +7,9 @@ import requests
 import urllib3
 
 from request_pipeline.config import Settings
+from request_pipeline.errors import GatewayBlockedError
 
-
-class GatewayBlockedError(RuntimeError):
-    """사내 웹 게이트웨이가 분석 요청을 차단했을 때 발생합니다."""
+__all__ = ["GatewayBlockedError", "analyze_request"]
 
 
 def _is_gateway_block(response: requests.Response) -> bool:
