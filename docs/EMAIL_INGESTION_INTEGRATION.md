@@ -16,6 +16,12 @@ cd /config/work/request-pipeline && python -m request_pipeline.run
 
 ## 야간 FILE_ARCHIVE
 
+> **주의: 아래 기능은 현재 `email-ingestion` 코드에 구현되어 있지 않습니다.**
+> `FILE_ARCHIVE_MODE` 환경변수, `--archive-only` 옵션, `SOURCE_MISSING` 상태 모두 없으며,
+> 지금은 `ingest_pop3.py` 1회 실행에서 수집과 FILE_ARCHIVE 저장을 함께 처리합니다.
+> POP3에서 원본이 사라진 ROUTED/RETRY 행은 별도 표시 없이 남습니다(모니터링 SQL로 확인).
+> 아래 내용은 향후 설계안으로만 참고하세요. (PIPELINE_WORKPLAN.md P6-3)
+
 `email-ingestion`에서 다음 설정을 사용합니다.
 
 ```env
