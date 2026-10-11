@@ -20,10 +20,10 @@ def _csv_items(name: str) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class Settings:
-    mysql_host: str = os.getenv("MYSQL_HOST", "127.0.0.1")
+    mysql_host: str = os.getenv("MYSQL_HOST", "10.172.127.210")
     mysql_port: int = int(os.getenv("MYSQL_PORT", "3306"))
-    mysql_database: str = os.getenv("MYSQL_DATABASE", "ifa")
-    mysql_user: str = os.getenv("MYSQL_USER", "ifa_user")
+    mysql_database: str = os.getenv("MYSQL_DATABASE", "fspas")
+    mysql_user: str = os.getenv("MYSQL_USER", "dbuser")
     mysql_password: str = os.getenv("MYSQL_PASSWORD", "")
 
     # 중앙 ingest_pop3 collector 도입 후 request-pipeline은 기본적으로 DB queue만 처리합니다.
