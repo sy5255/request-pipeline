@@ -16,25 +16,21 @@ cd /config/work/request-pipeline && python -m request_pipeline.run
 
 ## 야간 FILE_ARCHIVE
 
-> **주의: 아래 기능은 현재 `email-ingestion` 코드에 구현되어 있지 않습니다.**
-> `FILE_ARCHIVE_MODE` 환경변수, `--archive-only` 옵션, `SOURCE_MISSING` 상태 모두 없으며,
-> 지금은 `ingest_pop3.py` 1회 실행에서 수집과 FILE_ARCHIVE 저장을 함께 처리합니다.
-> POP3에서 원본이 사라진 ROUTED/RETRY 행은 별도 표시 없이 남습니다(모니터링 SQL로 확인).
-> 아래 내용은 향후 설계안으로만 참고하세요. (PIPELINE_WORKPLAN.md P6-3)
+`email-ingestion`의 `ingest_pop3.py`는 기본값 `FILE_ARCHIVE_MODE=NIGHT`로 동작합니다.
+재전송 등으로 발송이 취소된 메일이 파일로 남지 않도록, FILE_ARCHIVE 메일의 파일 저장을 미룹니다.
 
-`email-ingestion`에서 다음 설정을 사용합니다.
+| 실행 | 동작 |
+|---|---|
+| `python ingest_pop3.py` (04:00~05:00 외) | 신규 메일 수집·분류·DB 기록만. FILE_ARCHIVE 메일은 `ROUTED`(저장 대기) |
+| `python ingest_pop3.py` (서버 시각 04:00~05:00) | 수집·기록 후 저장 대기 메일(ROUTED/RETRY)을 파일로 저장 |
+| `python ingest_pop3.py --archive-only` (시간 무관) | 수집 없이 저장 대기 메일만 파일로 저장 |
 
-```env
-FILE_ARCHIVE_MODE=NIGHT
-```
+- 저장 시점에 POP3에서 uidl로 원본을 다시 받습니다. 원본이 사라진 메일(발송 취소)은 저장하지 않고 `SOURCE_MISSING`으로 종료합니다.
+- `RETRY`(일시 오류 후 재시도 대기)도 저장 대상이며, `FAILED`(재시도 횟수 초과)는 제외됩니다.
+- 자동 저장 시간대: `FILE_ARCHIVE_AUTO_START_HOUR=4`, `FILE_ARCHIVE_AUTO_END_HOUR=5` (끝 시각 미포함)
+- 예전처럼 수집 즉시 저장하려면 `FILE_ARCHIVE_MODE=IMMEDIATE`
 
-야간 잡:
-
-```bash
-cd /config/work/email-ingestion && python ingest_pop3.py --archive-only
-```
-
-발송 취소로 POP3에서 사라진 원본은 `SOURCE_MISSING`으로 종료되고 sharedworkspace에 저장되지 않습니다.
+1시간 주기 스케줄러로 `python ingest_pop3.py`만 등록해도 04시대 실행에서 자동으로 저장됩니다.
 
 ## 메일 발송 상태
 
